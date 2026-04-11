@@ -58,36 +58,35 @@ export function getConfigValue(config: PillarConfig, keyPath: string): unknown {
  * Returns a new config object (does not mutate the original).
  */
 export function setConfigValue(config: PillarConfig, keyPath: string, value: unknown): PillarConfig {
-  const clone = structuredClone(config);
+  // Build a plain object with the nested value, then deep-merge into the clone.
+  // This avoids any bracket-notation assignment on user-controlled keys,
+  // which CodeQL flags as prototype-polluting.
   const allKeys = keyPath.split('.');
-  const lastKey = allKeys.pop();
-  if (!lastKey) return clone;
 
-  // Validate every key segment against prototype pollution
-  for (const k of [...allKeys, lastKey]) {
-    if (k === '__proto__' || k === 'constructor' || k === 'prototype') {
-      throw new InvalidConfigError(`Key "${k}" is not allowed in config paths`);
-    }
-  }
-
-  // Only allow keys that are known top-level config sections
+  // Allowlist: only known config sections are accepted
   const ALLOWED_SECTIONS = new Set(['project', 'database', 'generation', 'map', 'extras']);
-  const topKey = allKeys[0] ?? lastKey;
-  if (!ALLOWED_SECTIONS.has(topKey)) {
-    throw new InvalidConfigError(`Unknown config section: "${topKey}"`);
+  const topKey = allKeys[0];
+  if (!topKey || !ALLOWED_SECTIONS.has(topKey)) {
+    throw new InvalidConfigError(`Unknown config section: "${topKey ?? keyPath}"`);
   }
 
-  let current: Record<string, unknown> = clone as unknown as Record<string, unknown>;
-  for (const key of allKeys) {
-    const next = Object.getOwnPropertyDescriptor(current, key);
-    if (!next || typeof next.value !== 'object' || next.value === null) {
-      const obj = Object.create(null) as Record<string, unknown>;
-      current[key] = obj;
-    }
-    current = current[key] as Record<string, unknown>;
+  // Build the nested patch object from the leaf up (no bracket assignment on user keys)
+  let patch: unknown = value;
+  for (let i = allKeys.length - 1; i >= 0; i--) {
+    const key = allKeys[i]!;
+    const wrapper = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(wrapper, key, {
+      value: patch,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+    patch = wrapper;
   }
 
-  current[lastKey] = value;
+  // Deep-merge the patch into a clone of the config using only own-property iteration
+  const clone = structuredClone(config);
+  deepMerge(clone as unknown as Record<string, unknown>, patch as Record<string, unknown>);
 
   // Re-validate after mutation
   const result = pillarConfigSchema.safeParse(clone);
@@ -99,4 +98,33 @@ export function setConfigValue(config: PillarConfig, keyPath: string, value: unk
   }
 
   return result.data;
+}
+
+/**
+ * Recursively merge `source` into `target`, using only own enumerable properties.
+ * Protects against prototype pollution by skipping dangerous keys and using
+ * Object.hasOwn + Object.defineProperty instead of bracket assignment.
+ */
+function deepMerge(target: Record<string, unknown>, source: Record<string, unknown>): void {
+  for (const key of Object.keys(source)) {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
+    if (!Object.hasOwn(source, key)) continue;
+
+    const sourceVal = source[key];
+    const targetVal = Object.hasOwn(target, key) ? target[key] : undefined;
+
+    if (
+      sourceVal !== null && typeof sourceVal === 'object' && !Array.isArray(sourceVal) &&
+      targetVal !== null && typeof targetVal === 'object' && !Array.isArray(targetVal)
+    ) {
+      deepMerge(targetVal as Record<string, unknown>, sourceVal as Record<string, unknown>);
+    } else {
+      Object.defineProperty(target, key, {
+        value: sourceVal,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
+    }
+  }
 }
