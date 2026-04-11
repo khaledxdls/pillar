@@ -40,7 +40,8 @@ export async function createCommand(filePath: string, options: CreateOptions): P
   const fullPath = path.join(projectRoot, filePath);
   const relativePath = path.relative(projectRoot, fullPath);
   const fileName = path.basename(filePath);
-  const isDirectory = filePath.endsWith('/');
+  const hasExtension = path.extname(fileName) !== '';
+  const isDirectory = filePath.endsWith('/') || !hasExtension;
 
   if (dryRun) {
     logger.banner('Dry Run');

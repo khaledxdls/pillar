@@ -110,6 +110,15 @@ program
     await doctorCommand();
   });
 
+// --- pillar explain ---
+program
+  .command('explain <path>')
+  .description('Explain what a file or folder does based on the project map')
+  .action(async (targetPath: string) => {
+    const { explainCommand } = await import('../commands/explain.js');
+    await explainCommand(targetPath);
+  });
+
 // --- pillar undo ---
 program
   .command('undo')

@@ -151,11 +151,14 @@ export class MapManager {
     }
 
     const mappedPaths = this.collectPaths(map.structure, '');
-    const actualTree = await readDirectoryTree(path.join(this.projectRoot, 'src'), this.projectRoot);
+    const actualTree = await readDirectoryTree(this.projectRoot);
     const actualPaths = this.flattenTree(actualTree);
 
-    const unmappedFiles = [...actualPaths].filter((p) => !mappedPaths.has(p));
-    const missingFiles = [...mappedPaths].filter((p) => !actualPaths.has(p));
+    // Only validate source files — root config files (package.json, tsconfig, etc.)
+    // are not meant to be tracked in the project map
+    const isSrcPath = (p: string) => p.startsWith('src/') || p.startsWith('src');
+    const unmappedFiles = [...actualPaths].filter((p) => isSrcPath(p) && !mappedPaths.has(p));
+    const missingFiles = [...mappedPaths].filter((p) => isSrcPath(p) && !actualPaths.has(p));
 
     return {
       unmappedFiles,
@@ -169,14 +172,12 @@ export class MapManager {
    */
   async refresh(config: PillarConfig): Promise<ProjectMap> {
     const existing = await this.load();
-    const srcDir = path.join(this.projectRoot, 'src');
 
-    if (!(await fs.pathExists(srcDir))) {
-      // Nothing to refresh from, keep or create minimal map
+    if (!(await fs.pathExists(this.projectRoot))) {
       return existing ?? this.initialize(config, {});
     }
 
-    const tree = await readDirectoryTree(srcDir, this.projectRoot);
+    const tree = await readDirectoryTree(this.projectRoot);
     const newStructure = this.treeToMapStructure(tree, existing?.structure ?? {});
 
     const map: ProjectMap = {
