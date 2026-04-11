@@ -59,14 +59,30 @@ export function getConfigValue(config: PillarConfig, keyPath: string): unknown {
  */
 export function setConfigValue(config: PillarConfig, keyPath: string, value: unknown): PillarConfig {
   const clone = structuredClone(config);
-  const keys = keyPath.split('.');
-  const lastKey = keys.pop();
+  const allKeys = keyPath.split('.');
+  const lastKey = allKeys.pop();
   if (!lastKey) return clone;
 
+  // Validate every key segment against prototype pollution
+  for (const k of [...allKeys, lastKey]) {
+    if (k === '__proto__' || k === 'constructor' || k === 'prototype') {
+      throw new InvalidConfigError(`Key "${k}" is not allowed in config paths`);
+    }
+  }
+
+  // Only allow keys that are known top-level config sections
+  const ALLOWED_SECTIONS = new Set(['project', 'database', 'generation', 'map', 'extras']);
+  const topKey = allKeys[0] ?? lastKey;
+  if (!ALLOWED_SECTIONS.has(topKey)) {
+    throw new InvalidConfigError(`Unknown config section: "${topKey}"`);
+  }
+
   let current: Record<string, unknown> = clone as unknown as Record<string, unknown>;
-  for (const key of keys) {
-    if (typeof current[key] !== 'object' || current[key] === null) {
-      current[key] = {};
+  for (const key of allKeys) {
+    const next = Object.getOwnPropertyDescriptor(current, key);
+    if (!next || typeof next.value !== 'object' || next.value === null) {
+      const obj = Object.create(null) as Record<string, unknown>;
+      current[key] = obj;
     }
     current = current[key] as Record<string, unknown>;
   }
