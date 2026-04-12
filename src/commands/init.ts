@@ -5,7 +5,7 @@ import chalk from 'chalk';
 import { type PillarConfig, writeConfig, DEFAULT_GENERATION, DEFAULT_MAP, DEFAULT_EXTRAS } from '../core/config/index.js';
 import { MapManager } from '../core/map/index.js';
 import { scaffoldProject } from '../core/generator/project-scaffolder.js';
-import { resolveDependencies } from '../core/generator/deps.js';
+import { resolveDependencies, getVersion } from '../core/generator/deps.js';
 import { HistoryManager } from '../core/history/index.js';
 import { logger, withSpinner, SUPPORTED_STACKS } from '../utils/index.js';
 import type { FileOperation } from '../core/history/types.js';
@@ -380,8 +380,8 @@ function buildPackageJson(
     private: true,
     type: 'module',
     scripts,
-    dependencies: Object.fromEntries(deps.dependencies.map((d) => [d, 'latest'])),
-    devDependencies: Object.fromEntries(deps.devDependencies.map((d) => [d, 'latest'])),
+    dependencies: Object.fromEntries(deps.dependencies.map((d) => [d, getVersion(d)])),
+    devDependencies: Object.fromEntries(deps.devDependencies.map((d) => [d, getVersion(d)])),
   };
 
   return pkg;

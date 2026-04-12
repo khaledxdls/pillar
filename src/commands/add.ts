@@ -5,8 +5,9 @@ import { loadConfig } from '../core/config/index.js';
 import { MapManager } from '../core/map/index.js';
 import { HistoryManager, type FileOperation } from '../core/history/index.js';
 import { ResourceGenerator } from '../core/generator/resource-generator.js';
+import { generateSkeleton } from '../core/generator/skeleton.js';
 import type { ResourceField } from '../core/generator/types.js';
-import { logger, findProjectRoot, withSpinner } from '../utils/index.js';
+import { logger, findProjectRoot, withSpinner, resolveResourcePath } from '../utils/index.js';
 
 interface AddResourceOptions {
   fields?: string;
@@ -119,6 +120,82 @@ export async function addResourceCommand(name: string, options: AddResourceOptio
   logger.blank();
   logger.info('Files created:');
   logger.list(files.map((f) => f.relativePath));
+  logger.blank();
+}
+
+interface AddMiddlewareOptions {
+  purpose?: string;
+  dryRun?: boolean;
+  force?: boolean;
+}
+
+export async function addMiddlewareCommand(name: string, options: AddMiddlewareOptions): Promise<void> {
+  const projectRoot = await findProjectRoot();
+  if (!projectRoot) {
+    logger.error('Not inside a Pillar project.', 'Run "pillar init" first.');
+    process.exitCode = 1;
+    return;
+  }
+
+  const config = await loadConfig(projectRoot);
+  const middlewareName = name.toLowerCase();
+  const ext = config.project.language === 'typescript' ? 'ts' : 'js';
+
+  const basePath = config.project.architecture === 'layered'
+    ? 'src/middleware'
+    : `${resolveResourcePath(config.project.architecture, 'shared')}/middleware`;
+
+  const fileName = `${middlewareName}.middleware.${ext}`;
+  const relativePath = `${basePath}/${fileName}`;
+  const purpose = options.purpose ?? `${middlewareName} middleware`;
+
+  const content = generateSkeleton(fileName, purpose, {
+    stack: config.project.stack,
+    language: config.project.language,
+  });
+
+  if (options.dryRun) {
+    logger.banner('Dry Run — Middleware Generation');
+    logger.info(`Middleware: ${chalk.cyan(middlewareName)}`);
+    logger.info(`File: ${chalk.cyan(relativePath)}`);
+    logger.blank();
+    logger.info('Preview:');
+    logger.blank();
+    console.log(chalk.dim(content));
+    return;
+  }
+
+  const fullPath = path.join(projectRoot, relativePath);
+
+  if (!options.force && await fs.pathExists(fullPath)) {
+    logger.error(`File already exists: ${relativePath}`);
+    logger.info('Use --force to overwrite.');
+    process.exitCode = 1;
+    return;
+  }
+
+  const operations: FileOperation[] = [];
+
+  await withSpinner(`Generating ${middlewareName} middleware`, async () => {
+    await fs.ensureDir(path.dirname(fullPath));
+    await fs.writeFile(fullPath, content, 'utf-8');
+    operations.push({ type: 'create', path: relativePath });
+  });
+
+  if (config.map.autoUpdate) {
+    const mapManager = new MapManager(projectRoot);
+    await mapManager.registerEntry(relativePath, purpose);
+  }
+
+  const history = new HistoryManager(projectRoot);
+  await history.record(`add middleware ${middlewareName}`, operations);
+
+  logger.blank();
+  logger.success(`Middleware "${middlewareName}" generated`);
+  logger.table([
+    ['File', relativePath],
+    ['Purpose', purpose],
+  ]);
   logger.blank();
 }
 

@@ -65,6 +65,17 @@ addCmd
   });
 
 addCmd
+  .command('middleware <name>')
+  .description('Generate a middleware file (e.g., "auth", "rate-limit")')
+  .option('-p, --purpose <text>', 'Purpose of this middleware')
+  .option('--dry-run', 'Preview without creating')
+  .option('-f, --force', 'Overwrite if file exists')
+  .action(async (name: string, options: { purpose?: string; dryRun?: boolean; force?: boolean }) => {
+    const { addMiddlewareCommand } = await import('../commands/add.js');
+    await addMiddlewareCommand(name, options);
+  });
+
+addCmd
   .command('linting')
   .description('Set up ESLint + Prettier with recommended configs')
   .action(async () => {
