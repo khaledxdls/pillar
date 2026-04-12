@@ -1,3 +1,5 @@
+import path from 'node:path';
+import fs from 'fs-extra';
 import type { PillarConfig } from '../config/index.js';
 import type { ProjectMap } from '../map/types.js';
 import type { AIGenerationPlan, AIRequestContext, AIProviderConfig } from './types.js';
@@ -144,6 +146,70 @@ export async function callAIProvider(
 
 export function getSystemPrompt(): string {
   return SYSTEM_PROMPT;
+}
+
+/**
+ * Two-pass AI generation:
+ *   Pass 1: Send map context → get initial plan (identifies affected files).
+ *   Pass 2: Read those files from disk, enrich the prompt, refine the plan.
+ *
+ * Falls back to single-pass if no files need modification or if the files don't exist.
+ */
+export async function callAIWithFileContext(
+  projectRoot: string,
+  providerConfig: AIProviderConfig,
+  systemPrompt: string,
+  userPrompt: string,
+): Promise<{ plan: AIGenerationPlan; totalTokens: number }> {
+  // Pass 1: initial plan from map context
+  const initialPlan = await callAIProvider(providerConfig, systemPrompt, userPrompt);
+  const pass1Tokens = Math.ceil((systemPrompt.length + userPrompt.length) / 4);
+
+  // Collect files that need modification
+  const filesToRead = initialPlan.modify
+    .map((a) => a.path)
+    .filter((p) => !p.startsWith('/') && !p.includes('..'));
+
+  if (filesToRead.length === 0) {
+    return { plan: initialPlan, totalTokens: pass1Tokens };
+  }
+
+  // Read affected files (cap total at ~8KB to keep tokens reasonable)
+  const fileContents: Array<{ path: string; content: string }> = [];
+  let totalBytes = 0;
+  const MAX_BYTES = 8192;
+
+  for (const filePath of filesToRead) {
+    const fullPath = path.join(projectRoot, filePath);
+    if (!await fs.pathExists(fullPath)) continue;
+
+    const content = await fs.readFile(fullPath, 'utf-8');
+    if (totalBytes + content.length > MAX_BYTES) break;
+    fileContents.push({ path: filePath, content });
+    totalBytes += content.length;
+  }
+
+  if (fileContents.length === 0) {
+    return { plan: initialPlan, totalTokens: pass1Tokens };
+  }
+
+  // Pass 2: enriched prompt with file contents
+  const fileContext = fileContents
+    .map((f) => `--- ${f.path} ---\n${f.content}`)
+    .join('\n\n');
+
+  const enrichedPrompt = [
+    userPrompt,
+    '',
+    'The following existing files will be modified. Use their actual content to generate accurate modifications:',
+    '',
+    fileContext,
+  ].join('\n');
+
+  const refinedPlan = await callAIProvider(providerConfig, systemPrompt, enrichedPrompt);
+  const pass2Tokens = Math.ceil((systemPrompt.length + enrichedPrompt.length) / 4);
+
+  return { plan: refinedPlan, totalTokens: pass1Tokens + pass2Tokens };
 }
 
 async function callOpenAI(

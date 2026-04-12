@@ -4,11 +4,16 @@ import type { PillarConfig } from '../config/index.js';
 import type { AIGenerationPlan, AIFileAction } from './types.js';
 import type { FileOperation } from '../history/types.js';
 import { generateSkeleton } from '../generator/skeleton.js';
+import { generateDiff, generateCreatePreview } from '../../utils/diff.js';
 
 interface ExecutionResult {
   operations: FileOperation[];
   createdFiles: string[];
   modifiedFiles: string[];
+}
+
+export interface PlanDiffPreview {
+  diffs: Array<{ path: string; diff: string }>;
 }
 
 /**
@@ -58,6 +63,39 @@ export async function executePlan(
   }
 
   return { operations, createdFiles, modifiedFiles };
+}
+
+/**
+ * Generate a diff preview of what the plan would do, without writing any files.
+ */
+export async function previewPlan(
+  projectRoot: string,
+  config: PillarConfig,
+  plan: AIGenerationPlan,
+): Promise<PlanDiffPreview> {
+  const diffs: Array<{ path: string; diff: string }> = [];
+
+  for (const action of plan.create) {
+    const fullPath = path.join(projectRoot, action.path);
+    if (await fs.pathExists(fullPath)) continue;
+
+    const content = generateFileFromAction(action, config);
+    diffs.push({ path: action.path, diff: generateCreatePreview(content, action.path) });
+  }
+
+  for (const action of plan.modify) {
+    const fullPath = path.join(projectRoot, action.path);
+    if (!(await fs.pathExists(fullPath))) continue;
+
+    const oldContent = await fs.readFile(fullPath, 'utf-8');
+    const newContent = applyModification(oldContent, action, config);
+
+    if (newContent !== oldContent) {
+      diffs.push({ path: action.path, diff: generateDiff(oldContent, newContent, action.path) });
+    }
+  }
+
+  return { diffs };
 }
 
 /**

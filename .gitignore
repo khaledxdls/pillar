@@ -5,3 +5,7 @@ dist/
 .DS_Store
 my-app/
 analysis_report.md.resolved
+pillar-fastifydev/
+pillar-nextjsdev/
+pillar-nestjsdev/
+pillar-realdev/

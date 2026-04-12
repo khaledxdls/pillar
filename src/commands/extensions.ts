@@ -4,6 +4,7 @@ import { MapManager } from '../core/map/index.js';
 import { HistoryManager } from '../core/history/index.js';
 import { parseFieldDef, addFieldToResource } from '../core/extensions/field-extension.js';
 import { parseEndpointDef, addEndpointToResource } from '../core/extensions/endpoint-extension.js';
+import { addRelationToResource, type RelationType } from '../core/extensions/relation-extension.js';
 import { logger, findProjectRoot, withSpinner } from '../utils/index.js';
 
 interface AddFieldOptions {
@@ -91,6 +92,70 @@ export async function addEndpointCommand(
 
   logger.blank();
   logger.success(`Added ${endpoint.method} ${endpoint.path} to ${resourceName}`);
+  logger.info('Modified files:');
+  logger.list(result.modifiedFiles);
+  logger.blank();
+}
+
+interface AddRelationOptions {
+  type?: string;
+}
+
+const VALID_RELATION_TYPES = new Set(['one-to-one', 'one-to-many', 'many-to-many']);
+
+export async function addRelationCommand(
+  sourceResource: string,
+  targetResource: string,
+  options: AddRelationOptions,
+): Promise<void> {
+  const projectRoot = await requireProject();
+  if (!projectRoot) return;
+
+  const relationType = (options.type ?? 'one-to-many') as RelationType;
+  if (!VALID_RELATION_TYPES.has(relationType)) {
+    logger.error(
+      `Invalid relation type: "${relationType}"`,
+      'Use one of: one-to-one, one-to-many, many-to-many',
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  const config = await loadConfig(projectRoot);
+
+  const result = await withSpinner(
+    `Adding ${relationType} relation: ${sourceResource} → ${targetResource}`,
+    async () =>
+      addRelationToResource(projectRoot, config, {
+        sourceResource,
+        targetResource,
+        type: relationType,
+      }),
+  );
+
+  if (result.modifiedFiles.length === 0) {
+    logger.warn(
+      `No files were modified. Check that resources "${sourceResource}" and "${targetResource}" exist.`,
+    );
+    return;
+  }
+
+  // Update map
+  if (config.map.autoUpdate) {
+    const mapManager = new MapManager(projectRoot);
+    const map = await mapManager.load();
+    if (map) {
+      for (const file of result.modifiedFiles) {
+        await mapManager.registerEntry(file, `(updated) added ${relationType} relation: ${sourceResource} ↔ ${targetResource}`);
+      }
+    }
+  }
+
+  const history = new HistoryManager(projectRoot);
+  await history.record(`add relation ${sourceResource} ${targetResource} --type ${relationType}`, result.operations);
+
+  logger.blank();
+  logger.success(`Added ${relationType} relation: ${sourceResource} → ${targetResource}`);
   logger.info('Modified files:');
   logger.list(result.modifiedFiles);
   logger.blank();

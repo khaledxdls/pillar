@@ -5,3 +5,4 @@ export type { TreeEntry } from './fs.js';
 export { resolveResourcePath } from './resolve-resource-path.js';
 export * from './constants.js';
 export * from './errors.js';
+export { generateDiff, generateCreatePreview } from './diff.js';

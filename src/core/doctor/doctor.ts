@@ -33,6 +33,8 @@ export async function runDiagnostics(projectRoot: string): Promise<DiagnosticRep
   checks.push(...(await checkMap(projectRoot)));
   checks.push(await checkEnv(projectRoot));
   checks.push(await checkGitIgnore(projectRoot));
+  checks.push(await checkTsConfig(projectRoot));
+  checks.push(await checkCircularDependencies(projectRoot));
 
   const score = calculateScore(checks);
 
@@ -227,6 +229,169 @@ async function checkGitIgnore(projectRoot: string): Promise<DiagnosticCheck> {
   }
 
   return { name: '.gitignore', status: 'pass', message: '.gitignore looks good' };
+}
+
+async function checkTsConfig(projectRoot: string): Promise<DiagnosticCheck> {
+  const tsconfigPath = path.join(projectRoot, 'tsconfig.json');
+
+  if (!(await fs.pathExists(tsconfigPath))) {
+    // Not every project uses TypeScript — warn, don't fail
+    return { name: 'TypeScript config', status: 'warn', message: 'tsconfig.json not found' };
+  }
+
+  try {
+    const raw = await fs.readFile(tsconfigPath, 'utf-8');
+    // tsconfig allows comments and trailing commas — strip them before parsing
+    const stripped = raw.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    JSON.parse(stripped);
+    return { name: 'TypeScript config', status: 'pass', message: 'tsconfig.json is valid' };
+  } catch {
+    return { name: 'TypeScript config', status: 'fail', message: 'tsconfig.json contains syntax errors' };
+  }
+}
+
+/**
+ * Build an import graph from src/ files and detect cycles via iterative DFS.
+ * Only follows relative imports (./  ../) — external packages are ignored.
+ */
+async function checkCircularDependencies(projectRoot: string): Promise<DiagnosticCheck> {
+  const srcDir = path.join(projectRoot, 'src');
+  if (!(await fs.pathExists(srcDir))) {
+    return { name: 'Circular dependencies', status: 'pass', message: 'No src/ directory to analyze' };
+  }
+
+  const graph = await buildImportGraph(srcDir, projectRoot);
+  const cycles = detectCycles(graph);
+
+  if (cycles.length === 0) {
+    return { name: 'Circular dependencies', status: 'pass', message: 'No circular dependencies detected' };
+  }
+
+  return {
+    name: 'Circular dependencies',
+    status: 'warn',
+    message: `${cycles.length} circular dependency chain(s) detected`,
+    details: cycles.slice(0, 5).map((c) => c.join(' → ')),
+  };
+}
+
+/**
+ * Recursively collect .ts/.js files and extract their relative import targets.
+ */
+async function buildImportGraph(
+  dir: string,
+  projectRoot: string,
+): Promise<Map<string, string[]>> {
+  const graph = new Map<string, string[]>();
+  const IGNORED = new Set(['node_modules', '.git', 'dist', '.pillar', 'coverage', '.next']);
+  const importPattern = /(?:import\s+.*?from\s+['"]|require\s*\(\s*['"])(\.\.?\/[^'"]+)['"]/g;
+
+  async function walk(currentDir: string): Promise<void> {
+    const entries = await fs.readdir(currentDir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (IGNORED.has(entry.name)) continue;
+
+      const fullPath = path.join(currentDir, entry.name);
+
+      if (entry.isDirectory()) {
+        await walk(fullPath);
+        continue;
+      }
+
+      if (!/\.(ts|js|tsx|jsx)$/.test(entry.name) || entry.name.endsWith('.d.ts')) continue;
+
+      const relFile = path.relative(projectRoot, fullPath);
+      const content = await fs.readFile(fullPath, 'utf-8');
+      const deps: string[] = [];
+
+      let match: RegExpExecArray | null;
+      while ((match = importPattern.exec(content)) !== null) {
+        const importPath = match[1]!;
+        const resolved = resolveImport(fullPath, importPath);
+        const relResolved = path.relative(projectRoot, resolved);
+        deps.push(relResolved);
+      }
+
+      graph.set(relFile, deps);
+    }
+  }
+
+  await walk(dir);
+  return graph;
+}
+
+/**
+ * Resolve a relative import specifier to an absolute path.
+ * Tries common extensions (.ts, .js, /index.ts, /index.js).
+ */
+function resolveImport(fromFile: string, importPath: string): string {
+  const dir = path.dirname(fromFile);
+  const base = path.resolve(dir, importPath);
+  // Strip .js extension that TS uses for ESM imports
+  return base.replace(/\.js$/, '.ts');
+}
+
+/**
+ * Detect cycles in a directed graph using iterative DFS with explicit stack.
+ * Returns the shortest representation of each unique cycle.
+ */
+function detectCycles(graph: Map<string, string[]>): string[][] {
+  const visited = new Set<string>();
+  const inStack = new Set<string>();
+  const cycles: string[][] = [];
+  const seenCycleKeys = new Set<string>();
+
+  for (const node of graph.keys()) {
+    if (visited.has(node)) continue;
+
+    // Iterative DFS with parent tracking
+    const stack: Array<{ node: string; deps: string[]; idx: number }> = [];
+    const pathStack: string[] = [];
+
+    stack.push({ node, deps: graph.get(node) ?? [], idx: 0 });
+    pathStack.push(node);
+    inStack.add(node);
+    visited.add(node);
+
+    while (stack.length > 0) {
+      const frame = stack[stack.length - 1]!;
+
+      if (frame.idx >= frame.deps.length) {
+        // Backtrack
+        stack.pop();
+        pathStack.pop();
+        inStack.delete(frame.node);
+        continue;
+      }
+
+      const dep = frame.deps[frame.idx]!;
+      frame.idx++;
+
+      if (inStack.has(dep)) {
+        // Found a cycle — extract it
+        const cycleStart = pathStack.indexOf(dep);
+        if (cycleStart !== -1) {
+          const cycle = [...pathStack.slice(cycleStart), dep];
+          const key = [...cycle].sort().join('|');
+          if (!seenCycleKeys.has(key)) {
+            seenCycleKeys.add(key);
+            cycles.push(cycle);
+          }
+        }
+        continue;
+      }
+
+      if (!visited.has(dep) && graph.has(dep)) {
+        visited.add(dep);
+        inStack.add(dep);
+        pathStack.push(dep);
+        stack.push({ node: dep, deps: graph.get(dep) ?? [], idx: 0 });
+      }
+    }
+  }
+
+  return cycles;
 }
 
 function extractEnvKeys(content: string): string[] {

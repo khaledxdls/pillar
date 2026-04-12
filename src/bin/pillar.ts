@@ -110,6 +110,15 @@ addCmd
     await addEndpointCommand(resource, definition, options);
   });
 
+addCmd
+  .command('relation <source> <target>')
+  .description('Add a relation between resources (e.g., "user posts --type one-to-many")')
+  .option('-t, --type <type>', 'Relation type: one-to-one, one-to-many, many-to-many', 'one-to-many')
+  .action(async (source: string, target: string, options: { type?: string }) => {
+    const { addRelationCommand } = await import('../commands/extensions.js');
+    await addRelationCommand(source, target, options);
+  });
+
 // --- pillar map ---
 program
   .command('map')
@@ -147,6 +156,16 @@ docsCmd
   .action(async (options: { output?: string }) => {
     const { docsGenerateCommand } = await import('../commands/docs.js');
     await docsGenerateCommand(options);
+  });
+
+docsCmd
+  .command('serve')
+  .description('Serve Swagger UI for the generated API docs')
+  .option('-p, --port <port>', 'Port to serve on', '4000')
+  .option('-o, --output <path>', 'OpenAPI spec file path', 'docs/openapi.json')
+  .action(async (options: { port?: string; output?: string }) => {
+    const { docsServeCommand } = await import('../commands/docs.js');
+    await docsServeCommand(options);
   });
 
 // --- pillar test ---
@@ -274,6 +293,25 @@ program
   .action(async () => {
     const { undoCommand } = await import('../commands/undo.js');
     await undoCommand();
+  });
+
+// --- pillar rename ---
+program
+  .command('rename <old-name> <new-name>')
+  .description('Rename a resource: folder, files, imports, and map entries')
+  .option('--dry-run', 'Preview without renaming')
+  .action(async (oldName: string, newName: string, options: { dryRun?: boolean }) => {
+    const { renameCommand } = await import('../commands/rename.js');
+    await renameCommand(oldName, newName, options);
+  });
+
+// --- pillar eject ---
+program
+  .command('eject')
+  .description('Remove Pillar metadata files, leaving generated code intact')
+  .action(async () => {
+    const { ejectCommand } = await import('../commands/eject.js');
+    await ejectCommand();
   });
 
 // --- Global error handling ---

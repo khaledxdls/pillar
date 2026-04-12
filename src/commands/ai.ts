@@ -5,11 +5,11 @@ import { HistoryManager } from '../core/history/index.js';
 import {
   buildContext,
   buildPrompt,
-  callAIProvider,
+  callAIWithFileContext,
   executePlan,
+  previewPlan,
   getSystemPrompt,
   type AIProviderConfig,
-  type AIGenerationPlan,
 } from '../core/ai/index.js';
 import { logger, findProjectRoot, withSpinner } from '../utils/index.js';
 
@@ -57,14 +57,18 @@ export async function aiCommand(request: string, options: AIOptions): Promise<vo
   const userPrompt = buildPrompt(context, request);
   const systemPrompt = getSystemPrompt();
 
-  // Show context size for transparency
+  // Show initial context size for transparency
   const contextTokens = Math.ceil((systemPrompt.length + userPrompt.length) / 4);
-  logger.info(`Context size: ~${contextTokens} tokens (map-optimized)`);
+  logger.info(`Map context: ~${contextTokens} tokens`);
 
-  // Call AI
-  const plan = await withSpinner('Thinking...', async () => {
-    return callAIProvider(providerConfig, systemPrompt, userPrompt);
+  // Two-pass AI call: map context → read affected files → refined plan
+  const { plan, totalTokens } = await withSpinner('Thinking...', async () => {
+    return callAIWithFileContext(projectRoot, providerConfig, systemPrompt, userPrompt);
   });
+
+  if (totalTokens > contextTokens * 2) {
+    logger.info(`Enriched with file context: ~${totalTokens} total tokens`);
+  }
 
   // Display the plan
   logger.blank();
@@ -88,6 +92,16 @@ export async function aiCommand(request: string, options: AIOptions): Promise<vo
       console.log(`      ${chalk.dim(file.purpose)}`);
     }
     logger.blank();
+  }
+
+  // Generate diff preview
+  const preview = await previewPlan(projectRoot, config, plan);
+  if (preview.diffs.length > 0) {
+    logger.banner('Diff Preview');
+    for (const entry of preview.diffs) {
+      console.log(entry.diff);
+      console.log();
+    }
   }
 
   if (options.dryRun) {
