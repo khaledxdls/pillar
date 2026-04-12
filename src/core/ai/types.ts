@@ -10,6 +10,9 @@ export interface AIFileAction {
   kind: string;
   fields?: Array<{ name: string; type: string }>;
   methods?: Array<{ name: string; description: string }>;
+  content?: string;
+  imports?: string[];
+  registrations?: string[];
 }
 
 export interface AIProviderConfig {
