@@ -10,11 +10,18 @@ export interface DiagnosticCheck {
   status: 'pass' | 'warn' | 'fail';
   message: string;
   details?: string[];
+  fixable?: boolean;
 }
 
 export interface DiagnosticReport {
   checks: DiagnosticCheck[];
   score: number;
+}
+
+export interface FixResult {
+  name: string;
+  fixed: boolean;
+  message: string;
 }
 
 export async function runDiagnostics(projectRoot: string): Promise<DiagnosticReport> {
@@ -136,6 +143,7 @@ async function checkMap(projectRoot: string): Promise<DiagnosticCheck[]> {
       status: 'warn',
       message: `${validation.unmappedFiles.length} file(s) not registered in the project map`,
       details: validation.unmappedFiles.slice(0, 10),
+      fixable: true,
     });
   } else {
     checks.push({
@@ -151,6 +159,7 @@ async function checkMap(projectRoot: string): Promise<DiagnosticCheck[]> {
       status: 'warn',
       message: `${validation.missingFiles.length} map entry/entries point to missing file(s)`,
       details: validation.missingFiles.slice(0, 10),
+      fixable: true,
     });
   } else {
     checks.push({
@@ -189,6 +198,7 @@ async function checkEnv(projectRoot: string): Promise<DiagnosticCheck> {
       status: 'warn',
       message: `${missing.length} key(s) from .env.example missing in .env`,
       details: missing,
+      fixable: true,
     };
   }
 
@@ -212,6 +222,7 @@ async function checkGitIgnore(projectRoot: string): Promise<DiagnosticCheck> {
       status: 'warn',
       message: `Missing critical entries in .gitignore`,
       details: missing,
+      fixable: true,
     };
   }
 
@@ -224,6 +235,172 @@ function extractEnvKeys(content: string): string[] {
     .filter((line) => line.trim() && !line.startsWith('#'))
     .map((line) => line.split('=')[0]!.trim())
     .filter(Boolean);
+}
+
+/**
+ * Attempt to auto-fix all fixable issues found by diagnostics.
+ * Each fixer is isolated — one failure does not block others.
+ */
+export async function runFixes(projectRoot: string, report: DiagnosticReport): Promise<FixResult[]> {
+  const results: FixResult[] = [];
+  const fixableChecks = report.checks.filter((c) => c.fixable && c.status !== 'pass');
+
+  if (fixableChecks.length === 0) {
+    return results;
+  }
+
+  const configPath = path.join(projectRoot, CONFIG_FILE);
+  let config: PillarConfig | null = null;
+  if (await fs.pathExists(configPath)) {
+    try {
+      const raw = await fs.readJson(configPath);
+      const parsed = pillarConfigSchema.safeParse(raw);
+      if (parsed.success) config = parsed.data;
+    } catch { /* config unavailable — skip config-dependent fixes */ }
+  }
+
+  for (const check of fixableChecks) {
+    try {
+      switch (check.name) {
+        case 'Missing files':
+          results.push(await fixMissingFiles(projectRoot, config));
+          break;
+        case 'Unmapped files':
+          results.push(await fixUnmappedFiles(projectRoot, config));
+          break;
+        case '.gitignore':
+          results.push(await fixGitIgnore(projectRoot, check.details ?? []));
+          break;
+        case 'Environment':
+          results.push(await fixEnv(projectRoot));
+          break;
+      }
+    } catch (error) {
+      results.push({
+        name: check.name,
+        fixed: false,
+        message: `Failed: ${error instanceof Error ? error.message : 'unknown error'}`,
+      });
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Remove stale map entries that reference files no longer on disk.
+ */
+async function fixMissingFiles(projectRoot: string, config: PillarConfig | null): Promise<FixResult> {
+  if (!config) {
+    return { name: 'Missing files', fixed: false, message: 'Cannot fix — config unavailable' };
+  }
+
+  const mapManager = new MapManager(projectRoot);
+  const validation = await mapManager.validate();
+
+  if (validation.missingFiles.length === 0) {
+    return { name: 'Missing files', fixed: true, message: 'No stale entries found' };
+  }
+
+  // Refresh rebuilds from filesystem, preserving purposes of files that still exist
+  await mapManager.refresh(config);
+
+  return {
+    name: 'Missing files',
+    fixed: true,
+    message: `Removed ${validation.missingFiles.length} stale map entry/entries`,
+  };
+}
+
+/**
+ * Register unmapped src/ files into the project map.
+ */
+async function fixUnmappedFiles(projectRoot: string, config: PillarConfig | null): Promise<FixResult> {
+  if (!config) {
+    return { name: 'Unmapped files', fixed: false, message: 'Cannot fix — config unavailable' };
+  }
+
+  const mapManager = new MapManager(projectRoot);
+  const validation = await mapManager.validate();
+
+  if (validation.unmappedFiles.length === 0) {
+    return { name: 'Unmapped files', fixed: true, message: 'No unmapped files found' };
+  }
+
+  for (const file of validation.unmappedFiles) {
+    // Only register files, not directories (directories end with /)
+    if (!file.endsWith('/')) {
+      await mapManager.registerEntry(file, '');
+    }
+  }
+
+  return {
+    name: 'Unmapped files',
+    fixed: true,
+    message: `Registered ${validation.unmappedFiles.filter((f) => !f.endsWith('/')).length} file(s) in the map`,
+  };
+}
+
+/**
+ * Append missing critical entries to .gitignore.
+ */
+async function fixGitIgnore(projectRoot: string, missingEntries: string[]): Promise<FixResult> {
+  const gitignorePath = path.join(projectRoot, '.gitignore');
+
+  let content = '';
+  if (await fs.pathExists(gitignorePath)) {
+    content = await fs.readFile(gitignorePath, 'utf-8');
+  }
+
+  const toAdd = missingEntries.filter((entry) => !content.includes(entry));
+  if (toAdd.length === 0) {
+    return { name: '.gitignore', fixed: true, message: 'No missing entries' };
+  }
+
+  const suffix = (content.endsWith('\n') || content === '') ? '' : '\n';
+  const additions = toAdd.map((e) => e.includes('/') ? e : `${e}/`).join('\n');
+  await fs.writeFile(gitignorePath, content + suffix + additions + '\n', 'utf-8');
+
+  return {
+    name: '.gitignore',
+    fixed: true,
+    message: `Added ${toAdd.length} entry/entries: ${toAdd.join(', ')}`,
+  };
+}
+
+/**
+ * Copy missing keys from .env.example to .env with empty values.
+ */
+async function fixEnv(projectRoot: string): Promise<FixResult> {
+  const envExample = path.join(projectRoot, '.env.example');
+  const envFile = path.join(projectRoot, '.env');
+
+  if (!(await fs.pathExists(envExample))) {
+    return { name: 'Environment', fixed: false, message: '.env.example does not exist' };
+  }
+
+  const exampleContent = await fs.readFile(envExample, 'utf-8');
+  let envContent = (await fs.pathExists(envFile))
+    ? await fs.readFile(envFile, 'utf-8')
+    : '';
+
+  const exampleKeys = extractEnvKeys(exampleContent);
+  const envKeys = new Set(extractEnvKeys(envContent));
+  const missing = exampleKeys.filter((k) => !envKeys.has(k));
+
+  if (missing.length === 0) {
+    return { name: 'Environment', fixed: true, message: 'No missing keys' };
+  }
+
+  const suffix = (envContent.endsWith('\n') || envContent === '') ? '' : '\n';
+  const additions = missing.map((k) => `${k}=`).join('\n');
+  await fs.writeFile(envFile, envContent + suffix + additions + '\n', 'utf-8');
+
+  return {
+    name: 'Environment',
+    fixed: true,
+    message: `Added ${missing.length} key(s) to .env: ${missing.join(', ')}`,
+  };
 }
 
 function calculateScore(checks: DiagnosticCheck[]): number {

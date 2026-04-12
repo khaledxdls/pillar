@@ -1,6 +1,7 @@
 import type { PillarConfig } from '../config/index.js';
 import type { ProjectMap } from '../map/types.js';
 import type { AIGenerationPlan, AIRequestContext, AIProviderConfig } from './types.js';
+import { aiGenerationPlanSchema } from './plan-schema.js';
 
 const SYSTEM_PROMPT = `You are Pillar AI, an architecture-aware code planning assistant.
 You receive a project context (stack, architecture, map) and a user request.
@@ -128,14 +129,17 @@ export async function callAIProvider(
     .replace(/```\s*$/m, '')
     .trim();
 
-  const plan = JSON.parse(cleaned) as AIGenerationPlan;
+  const raw: unknown = JSON.parse(cleaned);
 
-  // Validate the plan structure
-  if (!plan.summary || !Array.isArray(plan.create) || !Array.isArray(plan.modify)) {
-    throw new Error('AI response did not match expected plan schema');
+  const result = aiGenerationPlanSchema.safeParse(raw);
+  if (!result.success) {
+    const issues = result.error.issues
+      .map((i) => `${i.path.join('.')}: ${i.message}`)
+      .join('; ');
+    throw new Error(`AI plan validation failed: ${issues}`);
   }
 
-  return plan;
+  return result.data as AIGenerationPlan;
 }
 
 export function getSystemPrompt(): string {

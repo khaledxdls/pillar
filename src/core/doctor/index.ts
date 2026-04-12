@@ -1,2 +1,2 @@
-export { runDiagnostics } from './doctor.js';
-export type { DiagnosticCheck, DiagnosticReport } from './doctor.js';
+export { runDiagnostics, runFixes } from './doctor.js';
+export type { DiagnosticCheck, DiagnosticReport, FixResult } from './doctor.js';

@@ -117,7 +117,8 @@ program
   .option('--refresh', 'Rebuild map from filesystem')
   .option('--validate', 'Check map against actual files')
   .option('--export <format>', 'Export map as json or markdown')
-  .action(async (options: { refresh?: boolean; validate?: boolean; export?: string }) => {
+  .option('--purpose <args...>', 'Set the purpose of a file: --purpose <path> "<text>"')
+  .action(async (options: { refresh?: boolean; validate?: boolean; export?: string; purpose?: string[] }) => {
     const { mapCommand } = await import('../commands/map.js');
     await mapCommand(options);
   });
@@ -219,9 +220,10 @@ seedCmd
 program
   .command('doctor')
   .description('Run project health diagnostics')
-  .action(async () => {
+  .option('--fix', 'Auto-fix fixable issues')
+  .action(async (options: { fix?: boolean }) => {
     const { doctorCommand } = await import('../commands/doctor.js');
-    await doctorCommand();
+    await doctorCommand(options);
   });
 
 // --- pillar env ---

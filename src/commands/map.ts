@@ -7,6 +7,7 @@ interface MapOptions {
   refresh?: boolean;
   validate?: boolean;
   export?: string;
+  purpose?: string[];
 }
 
 export async function mapCommand(options: MapOptions): Promise<void> {
@@ -19,6 +20,30 @@ export async function mapCommand(options: MapOptions): Promise<void> {
 
   const config = await loadConfig(projectRoot);
   const mapManager = new MapManager(projectRoot);
+
+  if (options.purpose) {
+    const args = options.purpose;
+    if (args.length < 2) {
+      logger.error('Usage: pillar map --purpose <path> "<text>"');
+      process.exitCode = 1;
+      return;
+    }
+
+    const filePath = args[0]!;
+    const purposeText = args.slice(1).join(' ');
+
+    const map = await mapManager.load();
+    if (!map) {
+      logger.error('No project map found.', 'Run "pillar map --refresh" first.');
+      process.exitCode = 1;
+      return;
+    }
+
+    await mapManager.registerEntry(filePath, purposeText);
+    logger.success(`Updated purpose for ${chalk.cyan(filePath)}`);
+    logger.info(`  ${chalk.dim(purposeText)}`);
+    return;
+  }
 
   if (options.refresh) {
     await withSpinner('Refreshing project map', async () => {
