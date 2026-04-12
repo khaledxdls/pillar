@@ -66,6 +66,18 @@ export class HistoryManager {
           }
           break;
         }
+        case 'move': {
+          // Reverse the move: path is the new location, fromPath is the original
+          if (op.fromPath) {
+            const fromFull = path.join(this.projectRoot, op.fromPath);
+            await fs.ensureDir(path.dirname(fromFull));
+            await fs.move(fullPath, fromFull, { overwrite: false });
+            // Clean up empty parent directories left behind
+            const dir = path.dirname(fullPath);
+            await this.removeEmptyParents(dir);
+          }
+          break;
+        }
       }
     }
 

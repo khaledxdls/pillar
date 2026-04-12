@@ -284,7 +284,8 @@ async function buildImportGraph(
 ): Promise<Map<string, string[]>> {
   const graph = new Map<string, string[]>();
   const IGNORED = new Set(['node_modules', '.git', 'dist', '.pillar', 'coverage', '.next']);
-  const importPattern = /(?:import\s+.*?from\s+['"]|require\s*\(\s*['"])(\.\.?\/[^'"]+)['"]/g;
+  // Matches: import ... from './x', import './x', require('./x')
+  const importPattern = /(?:import\s+['"]|import\s+.*?from\s+['"]|require\s*\(\s*['"])(\.\.?\/[^'"]+)['"]/g;
 
   async function walk(currentDir: string): Promise<void> {
     const entries = await fs.readdir(currentDir, { withFileTypes: true });

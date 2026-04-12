@@ -118,17 +118,7 @@ export async function renameCommand(
   const operations: FileOperation[] = [];
 
   await withSpinner(`Renaming ${oldName} → ${newName}`, async () => {
-    // 1. Rename files within the directory (rename contents first)
-    for (const file of filesToRename) {
-      const content = await fs.readFile(file, 'utf-8');
-      const updated = replaceResourceName(content, oldName, newName);
-      if (updated !== content) {
-        operations.push({ type: 'modify', path: path.relative(projectRoot, file), previousContent: content });
-        await fs.writeFile(file, updated, 'utf-8');
-      }
-    }
-
-    // 2. Update import references in other source files
+    // 1. Update import references in files OUTSIDE the resource directory first
     for (const ref of importUpdates) {
       const content = await fs.readFile(ref.filePath, 'utf-8');
       const updated = ref.updater(content);
@@ -138,18 +128,52 @@ export async function renameCommand(
       }
     }
 
-    // 3. Rename the directory (move old → new)
+    // 2. Update content inside resource files (before moving them)
+    for (const file of filesToRename) {
+      const content = await fs.readFile(file, 'utf-8');
+      const updated = replaceResourceName(content, oldName, newName);
+      if (updated !== content) {
+        // Record modify with the OLD path — undo will restore content at the old location
+        operations.push({ type: 'modify', path: path.relative(projectRoot, file), previousContent: content });
+        await fs.writeFile(file, updated, 'utf-8');
+      }
+    }
+
+    // 3. Move the entire directory, then rename individual files.
+    //    Record each file move so undo can reverse them precisely.
+    //    Order matters: undo replays in reverse, so record dir-level first, file-level second.
+
+    // Snapshot the file list before moving (relative to the old dir)
+    const filesBefore = await discoverFiles(oldDir);
+    const fileRelPaths = filesBefore.map((f) => path.relative(oldDir, f));
+
+    // Move directory
     await fs.ensureDir(path.dirname(newDir));
     await fs.move(oldDir, newDir);
 
-    // 4. Rename files inside the new directory
-    const newFiles = await discoverFiles(newDir);
-    for (const file of newFiles) {
-      const basename = path.basename(file);
+    // Record the directory move
+    operations.push({
+      type: 'move',
+      path: path.relative(projectRoot, newDir),
+      fromPath: path.relative(projectRoot, oldDir),
+    });
+
+    // 4. Rename individual files inside the new directory
+    for (const relFile of fileRelPaths) {
+      const currentPath = path.join(newDir, relFile);
+      const basename = path.basename(relFile);
       const newBasename = basename.replace(new RegExp(`\\b${escapeRegex(oldName)}\\b`, 'g'), newName);
+
       if (newBasename !== basename) {
-        const newFilePath = path.join(path.dirname(file), newBasename);
-        await fs.move(file, newFilePath);
+        const dirInNew = path.dirname(currentPath);
+        const newFilePath = path.join(dirInNew, newBasename);
+        await fs.move(currentPath, newFilePath);
+
+        operations.push({
+          type: 'move',
+          path: path.relative(projectRoot, newFilePath),
+          fromPath: path.relative(projectRoot, currentPath),
+        });
       }
     }
   });
