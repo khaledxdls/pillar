@@ -199,13 +199,26 @@ async function extractFields(
 
   const content = await fs.readFile(targetPath, 'utf-8');
   const fields: SeedField[] = [];
+
+  // Match only the main resource interface to avoid pulling fields from ListResponse, etc.
+  const pascalName = resourceName.charAt(0).toUpperCase() + resourceName.slice(1);
+  const interfaceRegex = new RegExp(
+    `export\\s+interface\\s+${pascalName}\\s*\\{([^}]*)}`,
+  );
+  const interfaceMatch = content.match(interfaceRegex);
+  if (!interfaceMatch) return fields;
+
+  const interfaceBody = interfaceMatch[1]!;
   const fieldRegex = /^\s+(\w+)\??\s*:\s*(\w+)/gm;
   let match: RegExpExecArray | null;
 
-  while ((match = fieldRegex.exec(content)) !== null) {
+  while ((match = fieldRegex.exec(interfaceBody)) !== null) {
     const name = match[1]!;
     if (['id', 'createdAt', 'updatedAt'].includes(name)) continue;
-    fields.push({ name, type: match[2] ?? 'string' });
+    const type = match[2] ?? 'string';
+    // Skip relation fields (types that start with uppercase are likely other models)
+    if (/^[A-Z]/.test(type) && type !== 'Date' && type !== 'Record') continue;
+    fields.push({ name, type });
   }
 
   return fields;

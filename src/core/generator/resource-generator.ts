@@ -84,7 +84,13 @@ export class ResourceGenerator {
     return specs.map((spec) => {
       const fileName = `${name}.${spec.suffix}.${ext}`;
       const purpose = spec.purpose(name);
-      const content = generateSkeleton(fileName, purpose, this.context);
+      let content = generateSkeleton(fileName, purpose, this.context);
+
+      // Inject fields into model, types, and validator files
+      if (options.fields && options.fields.length > 0) {
+        content = injectFieldsIntoContent(content, options.fields, spec.suffix, name);
+      }
+
       const filePath = this.context.architecture === 'layered'
         ? `src/${LAYERED_DIRS[spec.suffix] ?? ''}/${fileName}`
         : `${basePath}/${fileName}`;
@@ -97,4 +103,93 @@ export class ResourceGenerator {
     });
   }
 
+}
+
+const TS_TYPE_MAP: Record<string, string> = {
+  string: 'string', number: 'number', boolean: 'boolean',
+  date: 'Date', int: 'number', float: 'number', uuid: 'string',
+  json: 'Record<string, unknown>',
+};
+
+const ZOD_TYPE_MAP: Record<string, string> = {
+  string: 'z.string()', number: 'z.number()', boolean: 'z.boolean()',
+  date: 'z.date()', int: 'z.number().int()', float: 'z.number()',
+  uuid: 'z.string().uuid()', json: 'z.record(z.unknown())',
+};
+
+/**
+ * Inject fields into generated skeleton content for model, types, and validator files.
+ */
+function injectFieldsIntoContent(
+  content: string,
+  fields: ResourceField[],
+  suffix: string,
+  resourceName: string,
+): string {
+  const pascalName = resourceName.charAt(0).toUpperCase() + resourceName.slice(1);
+
+  if (suffix === 'model') {
+    // Inject fields into the main interface before the closing }
+    const fieldLines = fields
+      .map((f) => `  ${f.name}${f.required === false ? '?' : ''}: ${TS_TYPE_MAP[f.type.toLowerCase()] ?? 'string'};`)
+      .join('\n');
+
+    // Insert fields into the main interface
+    content = content.replace(
+      new RegExp(`(export\\s+interface\\s+${pascalName}\\s*\\{[^}]*?)(\\n})`),
+      `$1\n${fieldLines}\n}`,
+    );
+
+    // Replace TODO in CreateInput
+    const createFields = fields
+      .map((f) => `  ${f.name}${f.required === false ? '?' : ''}: ${TS_TYPE_MAP[f.type.toLowerCase()] ?? 'string'};`)
+      .join('\n');
+    content = content.replace(
+      /  \/\/ TODO: define creation fields/,
+      createFields,
+    );
+
+    // Replace TODO in UpdateInput (all optional)
+    const updateFields = fields
+      .map((f) => `  ${f.name}?: ${TS_TYPE_MAP[f.type.toLowerCase()] ?? 'string'};`)
+      .join('\n');
+    content = content.replace(
+      /  \/\/ TODO: define update fields/,
+      updateFields,
+    );
+  }
+
+  if (suffix === 'types') {
+    // Inject fields into the main interface
+    const fieldLines = fields
+      .map((f) => `  ${f.name}${f.required === false ? '?' : ''}: ${TS_TYPE_MAP[f.type.toLowerCase()] ?? 'string'};`)
+      .join('\n');
+    content = content.replace(
+      new RegExp(`(export\\s+interface\\s+${pascalName}\\s*\\{[^}]*?)(\\n})`),
+      `$1\n${fieldLines}\n}`,
+    );
+  }
+
+  if (suffix === 'validator') {
+    // Replace TODO in create schema with Zod fields
+    const zodFields = fields
+      .filter((f) => f.required !== false)
+      .map((f) => `  ${f.name}: ${ZOD_TYPE_MAP[f.type.toLowerCase()] ?? 'z.string()'},`)
+      .join('\n');
+    content = content.replace(
+      /  \/\/ TODO: define creation schema/,
+      zodFields,
+    );
+
+    // Replace TODO in update schema with optional Zod fields
+    const zodUpdateFields = fields
+      .map((f) => `  ${f.name}: ${(ZOD_TYPE_MAP[f.type.toLowerCase()] ?? 'z.string()') + '.optional()'},`)
+      .join('\n');
+    content = content.replace(
+      /  \/\/ TODO: define update schema/,
+      zodUpdateFields,
+    );
+  }
+
+  return content;
 }

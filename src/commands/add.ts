@@ -1,7 +1,7 @@
 import path from 'node:path';
 import fs from 'fs-extra';
 import chalk from 'chalk';
-import { loadConfig } from '../core/config/index.js';
+import { loadConfig, type PillarConfig } from '../core/config/index.js';
 import { MapManager } from '../core/map/index.js';
 import { HistoryManager, type FileOperation } from '../core/history/index.js';
 import { ResourceGenerator } from '../core/generator/resource-generator.js';
@@ -111,6 +111,12 @@ export async function addResourceCommand(name: string, options: AddResourceOptio
     logger.info('Project map updated');
   }
 
+  // Auto-wire routes into app.ts
+  const routeWireResult = await wireRouteIntoApp(projectRoot, config, resourceName);
+  if (routeWireResult) {
+    operations.push(routeWireResult.operation);
+  }
+
   // Record history
   const historyManager = new HistoryManager(projectRoot);
   await historyManager.record(`add resource ${resourceName}`, operations);
@@ -197,6 +203,98 @@ export async function addMiddlewareCommand(name: string, options: AddMiddlewareO
     ['Purpose', purpose],
   ]);
   logger.blank();
+}
+
+/**
+ * Wire a resource's routes into the app entry file (app.ts/app.js).
+ * Adds the import statement and app.use() registration.
+ */
+async function wireRouteIntoApp(
+  projectRoot: string,
+  config: PillarConfig,
+  resourceName: string,
+): Promise<{ operation: FileOperation } | null> {
+  const ext = config.project.language === 'typescript' ? 'ts' : 'js';
+  const stack = config.project.stack;
+
+  // NestJS and Next.js handle routing differently
+  if (stack === 'nestjs' || stack === 'nextjs') return null;
+
+  const appPath = path.join(projectRoot, `src/app.${ext}`);
+  if (!(await fs.pathExists(appPath))) return null;
+
+  const content = await fs.readFile(appPath, 'utf-8');
+  const previousContent = content;
+
+  const pascalName = resourceName.charAt(0).toUpperCase() + resourceName.slice(1);
+  const camelName = resourceName.charAt(0).toLowerCase() + resourceName.slice(1);
+  const basePath = resolveResourcePath(config.project.architecture, resourceName);
+
+  // Compute relative import path from src/app.ts to the routes file
+  const routesRelPath = `./${path.relative('src', basePath)}/${resourceName}.routes.js`;
+
+  let importLine: string;
+  let registrationLine: string;
+
+  switch (stack) {
+    case 'fastify':
+      importLine = `import { ${camelName}Routes } from '${routesRelPath}';`;
+      registrationLine = `app.register(${camelName}Routes);`;
+      break;
+    case 'hono':
+      importLine = `import { ${camelName}Routes } from '${routesRelPath}';`;
+      registrationLine = `app.route('/${camelName}s', ${camelName}Routes);`;
+      break;
+    default:
+      // Express
+      importLine = `import { ${camelName}Router } from '${routesRelPath}';`;
+      registrationLine = `app.use('/${camelName}s', ${camelName}Router);`;
+      break;
+  }
+
+  // Skip if already wired
+  if (content.includes(importLine) || content.includes(registrationLine)) return null;
+
+  let updated = content;
+
+  // Add import after the last existing import
+  const lines = updated.split('\n');
+  let lastImportIndex = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i]!.trim().startsWith('import ')) {
+      lastImportIndex = i;
+    }
+  }
+  if (lastImportIndex >= 0) {
+    lines.splice(lastImportIndex + 1, 0, importLine);
+  } else {
+    lines.unshift(importLine);
+  }
+  updated = lines.join('\n');
+
+  // Add registration before the TODO comment or export
+  const todoMatch = updated.match(/^[ \t]*\/\/\s*TODO:?\s*register.*$/m);
+  if (todoMatch && todoMatch.index !== undefined) {
+    // Replace the TODO comment with the registration line
+    updated = updated.replace(todoMatch[0], `${registrationLine}`);
+  } else {
+    // Insert before export
+    const exportMatch = updated.match(/\nexport\s/);
+    if (exportMatch && exportMatch.index !== undefined) {
+      updated = updated.slice(0, exportMatch.index) + `\n${registrationLine}\n` + updated.slice(exportMatch.index);
+    }
+  }
+
+  if (updated === previousContent) return null;
+
+  await fs.writeFile(appPath, updated, 'utf-8');
+  return {
+    operation: {
+      type: 'modify',
+      path: `src/app.${ext}`,
+      previousContent,
+    },
+  };
 }
 
 /**

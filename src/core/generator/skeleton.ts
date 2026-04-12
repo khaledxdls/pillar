@@ -126,7 +126,11 @@ const SKELETON_GENERATORS: Record<FileKind, (p: SkeletonParams) => string> = {
     }
 
     // Express / Fastify / Hono
+    const expressImport = isTS && (stack === 'express' || stack === 'fastify' || !stack)
+      ? `import type { Request, Response } from 'express';\n`
+      : '';
     return [
+      ...(expressImport ? [expressImport.trimEnd()] : []),
       `import { ${pascalName}Service } from './${camelName}.service.js';`,
       '',
       `const ${camelName}Service = new ${pascalName}Service();`,
@@ -404,14 +408,18 @@ const SKELETON_GENERATORS: Record<FileKind, (p: SkeletonParams) => string> = {
     '',
   ].join('\n'),
 
-  middleware: ({ pascalName, isTS }) => {
+  middleware: ({ pascalName, isTS, stack }) => {
+    const importLine = isTS && (stack === 'express' || stack === 'fastify' || !stack)
+      ? `import type { Request, Response, NextFunction } from 'express';\n\n`
+      : '';
     return [
-      `export function ${pascalName.charAt(0).toLowerCase() + pascalName.slice(1)}Middleware(req${isTS ? ': Request' : ''}, res${isTS ? ': Response' : ''}, next${isTS ? ': () => void' : ''}) {`,
+      importLine.trimEnd(),
+      `export function ${pascalName.charAt(0).toLowerCase() + pascalName.slice(1)}Middleware(req${isTS ? ': Request' : ''}, res${isTS ? ': Response' : ''}, next${isTS ? ': NextFunction' : ''}) {`,
       '  // TODO: implement middleware logic',
       '  next();',
       '}',
       '',
-    ].join('\n');
+    ].filter(Boolean).join('\n');
   },
 
   util: ({ }) => [

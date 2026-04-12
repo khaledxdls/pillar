@@ -40,10 +40,21 @@ export async function addRelationToResource(
 
   const { sourceField, sourceType, inverseField, inverseType } = deriveFieldNames(relation);
 
+  const targetPascal = relation.targetResource.charAt(0).toUpperCase() + relation.targetResource.slice(1);
+  const sourcePascal = relation.sourceResource.charAt(0).toUpperCase() + relation.sourceResource.slice(1);
+
   // 1. Update source types/model
   for (const suffix of ['types', 'model']) {
     const filePath = path.join(projectRoot, sourceBase, `${relation.sourceResource}.${suffix}.${ext}`);
     if (!await fs.pathExists(filePath)) continue;
+
+    // Add import for the target type
+    const importPath = path.relative(
+      path.dirname(filePath),
+      path.join(projectRoot, targetBase, `${relation.targetResource}.${suffix}.${ext}`),
+    ).replace(/\\/g, '/').replace(/\.ts$/, '.js');
+    const importLine = `import type { ${targetPascal} } from './${importPath}';`;
+    await injectImportIfMissing(filePath, importLine, targetPascal);
 
     const result = await injectRelationField(filePath, relation.sourceResource, sourceField, sourceType, isTS);
     if (result) {
@@ -56,6 +67,14 @@ export async function addRelationToResource(
   for (const suffix of ['types', 'model']) {
     const filePath = path.join(projectRoot, targetBase, `${relation.targetResource}.${suffix}.${ext}`);
     if (!await fs.pathExists(filePath)) continue;
+
+    // Add import for the source type
+    const importPath = path.relative(
+      path.dirname(filePath),
+      path.join(projectRoot, sourceBase, `${relation.sourceResource}.${suffix}.${ext}`),
+    ).replace(/\\/g, '/').replace(/\.ts$/, '.js');
+    const importLine = `import type { ${sourcePascal} } from './${importPath}';`;
+    await injectImportIfMissing(filePath, importLine, sourcePascal);
 
     const result = await injectRelationField(filePath, relation.targetResource, inverseField, inverseType, isTS);
     if (result) {
@@ -182,4 +201,35 @@ async function injectRelationMethod(
   const updated = content.slice(0, lastBrace) + method + '\n' + content.slice(lastBrace);
   await fs.writeFile(repoPath, updated, 'utf-8');
   return { operation: { type: 'modify', path: repoPath, previousContent } };
+}
+
+/**
+ * Add an import statement to a file if the type name is not already imported.
+ */
+async function injectImportIfMissing(filePath: string, importLine: string, typeName: string): Promise<void> {
+  const content = await fs.readFile(filePath, 'utf-8');
+
+  // Skip if the type is already imported
+  if (content.includes(`import`) && content.includes(typeName) && content.match(new RegExp(`import.*\\b${typeName}\\b.*from`))) {
+    return;
+  }
+
+  // Add import after the last existing import or at the top
+  const lines = content.split('\n');
+  let lastImportIndex = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i]!.trim().startsWith('import ')) {
+      lastImportIndex = i;
+    }
+  }
+
+  if (lastImportIndex >= 0) {
+    lines.splice(lastImportIndex + 1, 0, importLine);
+  } else {
+    // Insert after the purpose comment
+    const purposeIndex = lines.findIndex((l) => l.startsWith('// Purpose:'));
+    lines.splice(purposeIndex >= 0 ? purposeIndex + 1 : 0, 0, '', importLine);
+  }
+
+  await fs.writeFile(filePath, lines.join('\n'), 'utf-8');
 }

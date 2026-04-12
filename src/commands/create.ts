@@ -74,8 +74,13 @@ export async function createCommand(filePath: string, options: CreateOptions): P
   }
 
   if (isDirectory) {
+    const dirExists = await fs.pathExists(fullPath);
     await fs.ensureDir(fullPath);
-    logger.success(`Created directory: ${chalk.cyan(relativePath)}`);
+    if (dirExists) {
+      logger.warn(`Directory already exists: ${chalk.cyan(relativePath)} — updating purpose.`);
+    } else {
+      logger.success(`Created directory: ${chalk.cyan(relativePath)}`);
+    }
   } else {
     const content = generateSkeleton(fileName, purpose, {
       stack: config.project.stack,

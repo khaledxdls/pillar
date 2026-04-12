@@ -269,24 +269,50 @@ async function findImportReferences(
  * Replace all occurrences of a resource name in content,
  * handling both the raw name and PascalCase variants.
  */
+/**
+ * HTTP methods and other common identifiers that should never be renamed,
+ * even if they match a resource name like "post" or "get".
+ */
+const PROTECTED_IDENTIFIERS = new Set([
+  'get', 'post', 'put', 'patch', 'delete', 'head', 'options',
+  'use', 'all', 'listen', 'send', 'json', 'status',
+]);
+
 function replaceResourceName(content: string, oldName: string, newName: string): string {
   let updated = content;
 
-  // Replace raw name (e.g., in import paths, file references)
-  updated = updated.replace(new RegExp(`\\b${escapeRegex(oldName)}\\b`, 'g'), newName);
-
-  // Replace PascalCase (e.g., UserProfile → OrderProfile)
+  // Replace PascalCase first (e.g., PostController → ArticleController, PostService → ArticleService)
+  // Use lookahead instead of \b at the end, since PascalCase names are prefixes in compound identifiers
   const oldPascal = toPascalCase(oldName);
   const newPascal = toPascalCase(newName);
   if (oldPascal !== newPascal) {
-    updated = updated.replace(new RegExp(`\\b${escapeRegex(oldPascal)}\\b`, 'g'), newPascal);
+    updated = updated.replace(new RegExp(`\\b${escapeRegex(oldPascal)}(?=[A-Z]|\\b)`, 'g'), newPascal);
   }
 
-  // Replace camelCase
+  // Replace camelCase (e.g., postService → articleService, postRouter → articleRouter)
+  // Use negative lookbehind for . to avoid matching method calls like router.post()
   const oldCamel = toCamelCase(oldName);
   const newCamel = toCamelCase(newName);
   if (oldCamel !== newCamel) {
-    updated = updated.replace(new RegExp(`\\b${escapeRegex(oldCamel)}\\b`, 'g'), newCamel);
+    updated = updated.replace(new RegExp(`(?<!\\.)\\b${escapeRegex(oldCamel)}(?=[A-Z])`, 'g'), newCamel);
+  }
+
+  // Replace raw name in safe contexts (import paths, file references, comments, strings)
+  // but NOT when it's a standalone identifier that could be an HTTP method like .post() or .get()
+  if (!PROTECTED_IDENTIFIERS.has(oldName.toLowerCase())) {
+    updated = updated.replace(new RegExp(`\\b${escapeRegex(oldName)}\\b`, 'g'), newName);
+  } else {
+    // For protected names like "post", only replace in import paths and string literals
+    // Replace in import paths: from './post.service.js' or from '../post/'
+    updated = updated.replace(
+      new RegExp(`(from\\s+['"][^'"]*?)\\b${escapeRegex(oldName)}\\b([^'"]*?['"])`, 'g'),
+      `$1${newName}$2`,
+    );
+    // Replace in comments
+    updated = updated.replace(
+      new RegExp(`(//.*?)\\b${escapeRegex(oldName)}\\b`, 'g'),
+      `$1${newName}`,
+    );
   }
 
   return updated;

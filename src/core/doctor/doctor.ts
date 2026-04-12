@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { execSync } from 'node:child_process';
 import fs from 'fs-extra';
 import type { PillarConfig } from '../config/index.js';
 import { MapManager } from '../map/index.js';
@@ -35,6 +36,7 @@ export async function runDiagnostics(projectRoot: string): Promise<DiagnosticRep
   checks.push(await checkGitIgnore(projectRoot));
   checks.push(await checkTsConfig(projectRoot));
   checks.push(await checkCircularDependencies(projectRoot));
+  checks.push(await checkTypeScript(projectRoot));
 
   const score = calculateScore(checks);
 
@@ -393,6 +395,45 @@ function detectCycles(graph: Map<string, string[]>): string[][] {
   }
 
   return cycles;
+}
+
+/**
+ * Run tsc --noEmit to catch type errors in the project.
+ * Only runs if a tsconfig.json exists and TypeScript is installed.
+ */
+async function checkTypeScript(projectRoot: string): Promise<DiagnosticCheck> {
+  const tsconfigPath = path.join(projectRoot, 'tsconfig.json');
+  if (!(await fs.pathExists(tsconfigPath))) {
+    return { name: 'Type checking', status: 'pass', message: 'No tsconfig.json — skipping type check' };
+  }
+
+  // Check if tsc is available
+  const tscPath = path.join(projectRoot, 'node_modules', '.bin', 'tsc');
+  if (!(await fs.pathExists(tscPath))) {
+    return { name: 'Type checking', status: 'warn', message: 'TypeScript not installed — skipping type check' };
+  }
+
+  try {
+    execSync(`${tscPath} --noEmit --pretty false 2>&1`, {
+      cwd: projectRoot,
+      timeout: 30000,
+      encoding: 'utf-8',
+    });
+    return { name: 'Type checking', status: 'pass', message: 'No TypeScript errors' };
+  } catch (err: unknown) {
+    const output = (err as { stdout?: string }).stdout ?? '';
+    const errorLines = output
+      .split('\n')
+      .filter((l) => l.includes('error TS'))
+      .slice(0, 5);
+
+    return {
+      name: 'Type checking',
+      status: 'warn',
+      message: `TypeScript type errors found`,
+      details: errorLines.length > 0 ? errorLines : ['Run "npx tsc --noEmit" for full output'],
+    };
+  }
 }
 
 function extractEnvKeys(content: string): string[] {

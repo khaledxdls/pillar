@@ -136,6 +136,11 @@ function generateArchitectureStructure(config: PillarConfig, ext: string): Gener
         purpose: 'Cross-feature utilities and shared code',
       });
       files.push({
+        relativePath: `src/infra/.gitkeep`,
+        content: '',
+        purpose: 'Infrastructure layer: database, middleware, and external services',
+      });
+      files.push({
         relativePath: `src/infra/database.${ext}`,
         content: `// Purpose: Database connection and configuration\n\n// TODO: configure database connection\nexport {};\n`,
         purpose: 'Database connection and configuration',

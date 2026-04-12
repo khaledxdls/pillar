@@ -221,16 +221,33 @@ async function extractFieldsFromSource(projectRoot: string, typesRelPath: string
   const content = await fs.readFile(fullPath, 'utf-8');
   const fields: FieldInfo[] = [];
 
-  // Match interface fields: name?: type;
+  // Extract the resource name from the file path to find the main interface
+  const baseName = path.basename(typesRelPath).replace(/\.(types|model)\.\w+$/, '');
+  const pascalName = baseName.charAt(0).toUpperCase() + baseName.slice(1);
+
+  // Match only the main resource interface (e.g., "export interface User { ... }")
+  // This avoids pulling fields from ListResponse, CreateInput, etc.
+  const interfaceRegex = new RegExp(
+    `export\\s+interface\\s+${pascalName}\\s*\\{([^}]*)}`,
+  );
+  const interfaceMatch = content.match(interfaceRegex);
+  if (!interfaceMatch) return fields;
+
+  const interfaceBody = interfaceMatch[1]!;
+
+  // Match interface fields within the main interface body only
   const fieldRegex = /^\s+(\w+)(\?)?\s*:\s*(\w+)/gm;
   let match: RegExpExecArray | null;
-  while ((match = fieldRegex.exec(content)) !== null) {
+  while ((match = fieldRegex.exec(interfaceBody)) !== null) {
     const name = match[1]!;
-    // Skip standard fields
+    // Skip standard fields and relation arrays
     if (['id', 'createdAt', 'updatedAt'].includes(name)) continue;
+    const type = match[3] ?? 'string';
+    // Skip relation fields (types that start with uppercase are likely other models)
+    if (/^[A-Z]/.test(type) && type !== 'Date' && type !== 'Record') continue;
     fields.push({
       name,
-      type: match[3] ?? 'string',
+      type,
       optional: match[2] === '?',
     });
   }

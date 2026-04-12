@@ -19,17 +19,26 @@ interface EndpointResult {
 /**
  * Parse an endpoint string like "GET /users/:id/posts" into a definition.
  */
-export function parseEndpointDef(raw: string): EndpointDefinition {
+export function parseEndpointDef(raw: string, resourceName?: string): EndpointDefinition {
   const parts = raw.trim().split(/\s+/);
   const method = (parts[0] ?? 'GET').toUpperCase();
-  const routePath = parts[1] ?? '/';
+  let routePath = parts[1] ?? '/';
 
-  // Derive handler name from method + path segments
+  // Derive handler name from method + path segments (before stripping prefix)
   const segments = routePath
     .split('/')
     .filter((s) => s && !s.startsWith(':'))
     .map((s) => s.charAt(0).toUpperCase() + s.slice(1));
   const handlerName = method.toLowerCase() + segments.join('');
+
+  // Strip the resource name prefix from the path to avoid duplication
+  // e.g., "/users/:id/posts" on the user router becomes "/:id/posts"
+  if (resourceName) {
+    const prefix = `/${resourceName}s`;
+    if (routePath.startsWith(prefix)) {
+      routePath = routePath.slice(prefix.length) || '/';
+    }
+  }
 
   return { method, path: routePath, handlerName };
 }

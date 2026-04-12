@@ -203,8 +203,8 @@ function injectRegistrations(content: string, registrations: string[]): string {
     return content.slice(0, todoMatch.index) + regBlock + '\n' + content.slice(todoMatch.index);
   }
 
-  // Strategy 2: Insert before `export { app` or `export default app`
-  const exportMatch = content.match(/^(export\s+\{[^}]*app|export\s+default\s+app)/m);
+  // Strategy 2: Insert before `export { app`, `export { router`, or `export default app`
+  const exportMatch = content.match(/^(export\s+\{[^}]*(app|router)|export\s+default\s+(app|router))/m);
   if (exportMatch && exportMatch.index !== undefined) {
     return content.slice(0, exportMatch.index) + regBlock + '\n' + content.slice(exportMatch.index);
   }

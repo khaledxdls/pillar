@@ -22,12 +22,17 @@ export async function addFieldCommand(
 
   const config = await loadConfig(projectRoot);
 
-  const fields = fieldStrings.map((f) => {
-    const def = parseFieldDef(f);
-    if (options.unique) def.unique = true;
-    if (options.optional) def.optional = true;
-    return def;
-  });
+  // Handle both quoted multi-field strings and separate arguments
+  // e.g., "role:string isActive:boolean" or role:string isActive:boolean
+  const fields = fieldStrings
+    .flatMap((f) => f.trim().split(/\s+/))
+    .filter((f) => f.includes(':'))
+    .map((f) => {
+      const def = parseFieldDef(f);
+      if (options.unique) def.unique = true;
+      if (options.optional) def.optional = true;
+      return def;
+    });
 
   const result = await withSpinner(
     `Adding ${fields.length} field(s) to ${resourceName}`,
@@ -35,7 +40,8 @@ export async function addFieldCommand(
   );
 
   if (result.modifiedFiles.length === 0) {
-    logger.warn(`No files were modified. Check that resource "${resourceName}" exists.`);
+    logger.error(`No files were modified. Check that resource "${resourceName}" exists.`);
+    process.exitCode = 1;
     return;
   }
 
@@ -63,7 +69,7 @@ export async function addEndpointCommand(
   if (!projectRoot) return;
 
   const config = await loadConfig(projectRoot);
-  const endpoint = parseEndpointDef(endpointStr);
+  const endpoint = parseEndpointDef(endpointStr, resourceName);
   const purpose = options.purpose ?? `${endpoint.method} ${endpoint.path}`;
 
   const result = await withSpinner(
@@ -72,7 +78,8 @@ export async function addEndpointCommand(
   );
 
   if (result.modifiedFiles.length === 0) {
-    logger.warn(`No files were modified. Check that resource "${resourceName}" exists.`);
+    logger.error(`No files were modified. Check that resource "${resourceName}" exists.`);
+    process.exitCode = 1;
     return;
   }
 
@@ -134,9 +141,10 @@ export async function addRelationCommand(
   );
 
   if (result.modifiedFiles.length === 0) {
-    logger.warn(
+    logger.error(
       `No files were modified. Check that resources "${sourceResource}" and "${targetResource}" exist.`,
     );
+    process.exitCode = 1;
     return;
   }
 
