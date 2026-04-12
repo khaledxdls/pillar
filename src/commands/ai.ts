@@ -62,29 +62,28 @@ export async function aiCommand(request: string, options: AIOptions): Promise<vo
   logger.info(`Context size: ~${contextTokens} tokens (map-optimized)`);
 
   // Call AI
-  let plan: AIGenerationPlan;
-  await withSpinner('Thinking...', async () => {
-    plan = await callAIProvider(providerConfig, systemPrompt, userPrompt);
+  const plan = await withSpinner('Thinking...', async () => {
+    return callAIProvider(providerConfig, systemPrompt, userPrompt);
   });
 
   // Display the plan
   logger.blank();
   logger.banner('AI Generation Plan');
-  console.log(`  ${chalk.dim(plan!.summary)}`);
+  console.log(`  ${chalk.dim(plan.summary)}`);
   logger.blank();
 
-  if (plan!.create.length > 0) {
-    logger.info(`Create ${plan!.create.length} file(s):`);
-    for (const file of plan!.create) {
+  if (plan.create.length > 0) {
+    logger.info(`Create ${plan.create.length} file(s):`);
+    for (const file of plan.create) {
       console.log(`    ${chalk.green('+')} ${chalk.cyan(file.path)}`);
       console.log(`      ${chalk.dim(file.purpose)}`);
     }
     logger.blank();
   }
 
-  if (plan!.modify.length > 0) {
-    logger.info(`Modify ${plan!.modify.length} file(s):`);
-    for (const file of plan!.modify) {
+  if (plan.modify.length > 0) {
+    logger.info(`Modify ${plan.modify.length} file(s):`);
+    for (const file of plan.modify) {
       console.log(`    ${chalk.yellow('~')} ${chalk.cyan(file.path)}`);
       console.log(`      ${chalk.dim(file.purpose)}`);
     }
@@ -112,13 +111,13 @@ export async function aiCommand(request: string, options: AIOptions): Promise<vo
 
   // Execute the plan
   const result = await withSpinner('Generating code from plan', async () => {
-    return executePlan(projectRoot, config, plan!);
+    return executePlan(projectRoot, config, plan);
   });
 
   // Update map
   if (config.map.autoUpdate && map) {
     await withSpinner('Updating project map', async () => {
-      for (const file of plan!.create) {
+      for (const file of plan.create) {
         await mapManager.registerEntry(file.path, file.purpose);
       }
     });

@@ -3,6 +3,7 @@ import fs from 'fs-extra';
 import type { PillarConfig } from '../config/index.js';
 import type { MapNode } from '../map/types.js';
 import { MapManager } from '../map/index.js';
+import { resolveResourcePath } from '../../utils/resolve-resource-path.js';
 
 interface SeedField {
   name: string;
@@ -28,7 +29,7 @@ export async function generateSeedFile(
 ): Promise<GeneratedSeed> {
   const ext = config.project.language === 'typescript' ? 'ts' : 'js';
   const isTS = config.project.language === 'typescript';
-  const basePath = resolveResourcePath(config, resourceName);
+  const basePath = resolveResourcePath(config.project.architecture, resourceName);
   const seedDir = 'src/seeds';
   const seedPath = `${seedDir}/${resourceName}.seed.${ext}`;
 
@@ -120,8 +121,12 @@ function generateSeedContent(opts: SeedContentOptions): string {
     '// Simple seeded random for deterministic fake data',
     'let _seed = 42;',
     'function rand() { _seed = (_seed * 16807 + 0) % 2147483647; return (_seed - 1) / 2147483646; }',
-    'function randInt(min: number, max: number) { return Math.floor(rand() * (max - min + 1)) + min; }',
-    'function randItem<T>(arr: T[]): T { return arr[Math.floor(rand() * arr.length)]!; }',
+    isTS
+      ? 'function randInt(min: number, max: number) { return Math.floor(rand() * (max - min + 1)) + min; }'
+      : 'function randInt(min, max) { return Math.floor(rand() * (max - min + 1)) + min; }',
+    isTS
+      ? 'function randItem<T>(arr: T[]): T { return arr[Math.floor(rand() * arr.length)]!; }'
+      : 'function randItem(arr) { return arr[Math.floor(rand() * arr.length)]; }',
     '',
   );
 
@@ -188,7 +193,7 @@ async function extractFields(
   const typesPath = path.join(projectRoot, basePath, `${resourceName}.types.${ext}`);
   const modelPath = path.join(projectRoot, basePath, `${resourceName}.model.${ext}`);
   const targetPath = (await fs.pathExists(typesPath)) ? typesPath :
-                     (await fs.pathExists(modelPath)) ? modelPath : null;
+    (await fs.pathExists(modelPath)) ? modelPath : null;
 
   if (!targetPath) return [];
 
@@ -246,11 +251,4 @@ function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
-function resolveResourcePath(config: PillarConfig, name: string): string {
-  switch (config.project.architecture) {
-    case 'feature-first': return `src/features/${name}`;
-    case 'layered': return 'src';
-    case 'modular': return `src/modules/${name}`;
-    default: return `src/features/${name}`;
-  }
-}
+

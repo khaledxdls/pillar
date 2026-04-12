@@ -4,3 +4,4 @@ dist/
 .env
 .DS_Store
 my-app/
+analysis_report.md.resolved

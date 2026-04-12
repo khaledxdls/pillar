@@ -2,6 +2,7 @@ import path from 'node:path';
 import fs from 'fs-extra';
 import type { PillarConfig } from '../config/index.js';
 import type { FileOperation } from '../history/types.js';
+import { resolveResourcePath } from '../../utils/resolve-resource-path.js';
 
 interface EndpointDefinition {
   method: string;
@@ -44,7 +45,7 @@ export async function addEndpointToResource(
 ): Promise<EndpointResult> {
   const ext = config.project.language === 'typescript' ? 'ts' : 'js';
   const isTS = config.project.language === 'typescript';
-  const basePath = resolveResourcePath(config, resourceName);
+  const basePath = resolveResourcePath(config.project.architecture, resourceName);
   const operations: FileOperation[] = [];
   const modifiedFiles: string[] = [];
 
@@ -100,15 +101,4 @@ export async function addEndpointToResource(
   return { operations, modifiedFiles };
 }
 
-function resolveResourcePath(config: PillarConfig, name: string): string {
-  switch (config.project.architecture) {
-    case 'feature-first':
-      return `src/features/${name}`;
-    case 'layered':
-      return 'src';
-    case 'modular':
-      return `src/modules/${name}`;
-    default:
-      return `src/features/${name}`;
-  }
-}
+

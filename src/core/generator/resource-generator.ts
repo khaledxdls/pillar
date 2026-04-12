@@ -1,6 +1,7 @@
 import type { PillarConfig } from '../config/index.js';
 import type { GeneratedFile, GeneratorContext, ResourceField } from './types.js';
 import { generateSkeleton } from './skeleton.js';
+import { resolveResourcePath } from '../../utils/resolve-resource-path.js';
 
 interface ResourceOptions {
   name: string;
@@ -26,6 +27,17 @@ const RESOURCE_FILES: ResourceFileSpec[] = [
   { suffix: 'test', purpose: (n: string) => `Unit and integration tests for ${n}`, kind: 'test' },
 ];
 
+const LAYERED_DIRS: Record<string, string> = {
+  model: 'models',
+  repository: 'repositories',
+  service: 'services',
+  controller: 'controllers',
+  routes: 'routes',
+  validator: 'validators',
+  types: 'types',
+  test: 'tests',
+};
+
 export class ResourceGenerator {
   private readonly context: GeneratorContext;
 
@@ -47,7 +59,7 @@ export class ResourceGenerator {
   generate(options: ResourceOptions): GeneratedFile[] {
     const { name, skipTest, only } = options;
     const ext = this.context.language === 'typescript' ? 'ts' : 'js';
-    const basePath = this.getBasePath(name);
+    const basePath = resolveResourcePath(this.context.architecture, name);
 
     let specs = RESOURCE_FILES;
 
@@ -73,28 +85,16 @@ export class ResourceGenerator {
       const fileName = `${name}.${spec.suffix}.${ext}`;
       const purpose = spec.purpose(name);
       const content = generateSkeleton(fileName, purpose, this.context);
+      const filePath = this.context.architecture === 'layered'
+        ? `src/${LAYERED_DIRS[spec.suffix] ?? ''}/${fileName}`
+        : `${basePath}/${fileName}`;
 
       return {
-        relativePath: `${basePath}/${fileName}`,
+        relativePath: filePath,
         content,
         purpose,
       };
     });
   }
 
-  /**
-   * Get the base directory path for a resource based on the architecture.
-   */
-  private getBasePath(name: string): string {
-    switch (this.context.architecture) {
-      case 'feature-first':
-        return `src/features/${name}`;
-      case 'layered':
-        return `src`;
-      case 'modular':
-        return `src/modules/${name}`;
-      default:
-        return `src/features/${name}`;
-    }
-  }
 }

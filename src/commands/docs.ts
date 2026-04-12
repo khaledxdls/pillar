@@ -21,21 +21,19 @@ export async function docsGenerateCommand(options: DocsOptions): Promise<void> {
   const config = await loadConfig(projectRoot);
   const outputFile = options.output ?? 'docs/openapi.json';
 
-  let spec: Awaited<ReturnType<typeof generateOpenAPISpec>>;
-
-  await withSpinner('Scanning routes and models', async () => {
-    spec = await generateOpenAPISpec(projectRoot, config);
+  const spec = await withSpinner('Scanning routes and models', async () => {
+    return generateOpenAPISpec(projectRoot, config);
   });
 
   const outputPath = path.join(projectRoot, outputFile);
 
   await withSpinner(`Writing ${outputFile}`, async () => {
     await fs.ensureDir(path.dirname(outputPath));
-    await fs.writeJson(outputPath, spec!, { spaces: 2 });
+    await fs.writeJson(outputPath, spec, { spaces: 2 });
   });
 
-  const pathCount = Object.keys(spec!.paths).length;
-  const schemaCount = Object.keys(spec!.components.schemas).length;
+  const pathCount = Object.keys(spec.paths).length;
+  const schemaCount = Object.keys(spec.components.schemas).length;
 
   // Record history
   const history = new HistoryManager(projectRoot);

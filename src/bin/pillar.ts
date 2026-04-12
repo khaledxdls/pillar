@@ -2,15 +2,19 @@
 
 import { Command, CommanderError } from 'commander';
 import chalk from 'chalk';
+import { createRequire } from 'node:module';
 import { logger } from '../utils/logger.js';
 import { PillarError } from '../utils/errors.js';
+
+const require = createRequire(import.meta.url);
+const { version } = require('../../package.json') as { version: string };
 
 const program = new Command();
 
 program
   .name('pillar')
   .description('AI-aware architecture engine — scaffold, generate, and maintain production-ready projects')
-  .version('0.1.0')
+  .version(version)
   .option('-v, --verbose', 'Enable verbose logging')
   .hook('preAction', (thisCommand) => {
     const opts = thisCommand.opts();

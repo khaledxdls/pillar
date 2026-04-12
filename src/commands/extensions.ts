@@ -76,12 +76,11 @@ export async function addEndpointCommand(
   }
 
   // Update map with endpoint purpose
-  if (config.map.autoUpdate) {
+  if (config.map.autoUpdate && result.modifiedFiles.length > 0) {
     const mapManager = new MapManager(projectRoot);
-    for (const file of result.modifiedFiles) {
-      const existing = await mapManager.load();
-      if (existing) {
-        // Keep existing purpose, just note the addition
+    const map = await mapManager.load();
+    if (map) {
+      for (const file of result.modifiedFiles) {
         await mapManager.registerEntry(file, `(updated) added ${endpoint.method} ${endpoint.path}`);
       }
     }

@@ -18,7 +18,9 @@ interface InitOptions {
 export async function initCommand(projectName: string | undefined, options: InitOptions): Promise<void> {
   logger.banner('Pillar — Project Initialization');
 
-  const answers = await promptUser(projectName);
+  const answers = options.yes
+    ? getDefaultAnswers(projectName ?? 'my-app')
+    : await promptUser(projectName);
   const projectDir = path.resolve(answers.projectName);
 
   // Check if directory exists and has content
@@ -149,6 +151,22 @@ interface UserAnswers {
   packageManager: string;
   extras: string[];
   testFramework: string;
+}
+
+function getDefaultAnswers(projectName: string): UserAnswers {
+  return {
+    projectName,
+    platform: 'web',
+    category: 'api' as Category,
+    stack: 'express' as Stack,
+    language: 'typescript',
+    database: 'none',
+    orm: 'none',
+    architecture: 'feature-first',
+    packageManager: 'npm',
+    extras: [],
+    testFramework: 'vitest',
+  };
 }
 
 async function promptUser(projectName?: string): Promise<UserAnswers> {

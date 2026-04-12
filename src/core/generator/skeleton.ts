@@ -67,10 +67,12 @@ export function generateSkeleton(
   const isTS = fileName.endsWith('.ts') || fileName.endsWith('.tsx');
   const stack = context?.stack;
 
+  const testFramework = context?.testFramework;
+
   const header = `// Purpose: ${purpose}\n\n`;
 
   const generator = SKELETON_GENERATORS[kind];
-  return header + generator({ baseName, pascalName, camelName, isTS, stack, purpose });
+  return header + generator({ baseName, pascalName, camelName, isTS, stack, testFramework, purpose });
 }
 
 interface SkeletonParams {
@@ -79,6 +81,7 @@ interface SkeletonParams {
   camelName: string;
   isTS: boolean;
   stack?: Stack;
+  testFramework?: string;
   purpose: string;
 }
 
@@ -260,11 +263,11 @@ const SKELETON_GENERATORS: Record<FileKind, (p: SkeletonParams) => string> = {
         `const controller = new ${pascalName}Controller();`,
         '',
         `export async function ${camelName}Routes(app${isTS ? ': FastifyInstance' : ''}) {`,
-        `  app.get('/${camelName}s', controller.findAll);`,
-        `  app.get('/${camelName}s/:id', controller.findOne);`,
-        `  app.post('/${camelName}s', controller.create);`,
-        `  app.put('/${camelName}s/:id', controller.update);`,
-        `  app.delete('/${camelName}s/:id', controller.remove);`,
+        `  app.get('/${camelName}s', (req, res) => controller.findAll(req, res));`,
+        `  app.get('/${camelName}s/:id', (req, res) => controller.findOne(req, res));`,
+        `  app.post('/${camelName}s', (req, res) => controller.create(req, res));`,
+        `  app.put('/${camelName}s/:id', (req, res) => controller.update(req, res));`,
+        `  app.delete('/${camelName}s/:id', (req, res) => controller.remove(req, res));`,
         '}',
         '',
       ].join('\n');
@@ -277,11 +280,11 @@ const SKELETON_GENERATORS: Record<FileKind, (p: SkeletonParams) => string> = {
         `const controller = new ${pascalName}Controller();`,
         `export const ${camelName}Routes = new Hono();`,
         '',
-        `${camelName}Routes.get('/', controller.findAll);`,
-        `${camelName}Routes.get('/:id', controller.findOne);`,
-        `${camelName}Routes.post('/', controller.create);`,
-        `${camelName}Routes.put('/:id', controller.update);`,
-        `${camelName}Routes.delete('/:id', controller.remove);`,
+        `${camelName}Routes.get('/', (c) => controller.findAll(c));`,
+        `${camelName}Routes.get('/:id', (c) => controller.findOne(c));`,
+        `${camelName}Routes.post('/', (c) => controller.create(c));`,
+        `${camelName}Routes.put('/:id', (c) => controller.update(c));`,
+        `${camelName}Routes.delete('/:id', (c) => controller.remove(c));`,
         '',
       ].join('\n');
     }
@@ -293,11 +296,11 @@ const SKELETON_GENERATORS: Record<FileKind, (p: SkeletonParams) => string> = {
       `const router = Router();`,
       `const controller = new ${pascalName}Controller();`,
       '',
-      `router.get('/', controller.findAll);`,
-      `router.get('/:id', controller.findOne);`,
-      `router.post('/', controller.create);`,
-      `router.put('/:id', controller.update);`,
-      `router.delete('/:id', controller.remove);`,
+      `router.get('/', (req, res) => controller.findAll(req, res));`,
+      `router.get('/:id', (req, res) => controller.findOne(req, res));`,
+      `router.post('/', (req, res) => controller.create(req, res));`,
+      `router.put('/:id', (req, res) => controller.update(req, res));`,
+      `router.delete('/:id', (req, res) => controller.remove(req, res));`,
       '',
       `export { router as ${camelName}Router };`,
       '',
@@ -352,40 +355,43 @@ const SKELETON_GENERATORS: Record<FileKind, (p: SkeletonParams) => string> = {
     '',
   ].join('\n'),
 
-  test: ({ pascalName, camelName, isTS }) => [
-    `import { describe, it, expect, beforeEach } from 'vitest';`,
-    `import { ${pascalName}Service } from './${camelName}.service.js';`,
-    '',
-    `describe('${pascalName}Service', () => {`,
-    `  let service${isTS ? `: ${pascalName}Service` : ''};`,
-    '',
-    '  beforeEach(() => {',
-    `    service = new ${pascalName}Service();`,
-    '  });',
-    '',
-    '  describe("findAll", () => {',
-    '    it("should return all items", async () => {',
-    '      // TODO: implement test',
-    '      expect(service).toBeDefined();',
-    '    });',
-    '  });',
-    '',
-    '  describe("findOne", () => {',
-    '    it("should return a single item by id", async () => {',
-    '      // TODO: implement test',
-    '      expect(service).toBeDefined();',
-    '    });',
-    '  });',
-    '',
-    '  describe("create", () => {',
-    '    it("should create a new item", async () => {',
-    '      // TODO: implement test',
-    '      expect(service).toBeDefined();',
-    '    });',
-    '  });',
-    '});',
-    '',
-  ].join('\n'),
+  test: ({ pascalName, camelName, isTS, testFramework }) => {
+    const importSource = testFramework === 'jest' ? '@jest/globals' : 'vitest';
+    return [
+      `import { describe, it, expect, beforeEach } from '${importSource}';`,
+      `import { ${pascalName}Service } from './${camelName}.service.js';`,
+      '',
+      `describe('${pascalName}Service', () => {`,
+      `  let service${isTS ? `: ${pascalName}Service` : ''};`,
+      '',
+      '  beforeEach(() => {',
+      `    service = new ${pascalName}Service();`,
+      '  });',
+      '',
+      '  describe("findAll", () => {',
+      '    it("should return all items", async () => {',
+      '      // TODO: implement test',
+      '      expect(service).toBeDefined();',
+      '    });',
+      '  });',
+      '',
+      '  describe("findOne", () => {',
+      '    it("should return a single item by id", async () => {',
+      '      // TODO: implement test',
+      '      expect(service).toBeDefined();',
+      '    });',
+      '  });',
+      '',
+      '  describe("create", () => {',
+      '    it("should create a new item", async () => {',
+      '      // TODO: implement test',
+      '      expect(service).toBeDefined();',
+      '    });',
+      '  });',
+      '});',
+      '',
+    ].join('\n');
+  },
 
   component: ({ pascalName }) => [
     `export function ${pascalName}() {`,
