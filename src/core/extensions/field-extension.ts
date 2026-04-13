@@ -3,6 +3,7 @@ import fs from 'fs-extra';
 import type { PillarConfig } from '../config/index.js';
 import type { FileOperation } from '../history/types.js';
 import { resolveResourcePath } from '../../utils/resolve-resource-path.js';
+import { escapeRegex, assertSafeResourceName } from '../../utils/sanitize.js';
 
 interface FieldDefinition {
   name: string;
@@ -89,9 +90,10 @@ async function injectFieldsIntoInterface(
   const previousContent = content;
 
   // Find the main interface (PascalCase of resource name)
+  assertSafeResourceName(resourceName);
   const pascalName = resourceName.charAt(0).toUpperCase() + resourceName.slice(1);
   const interfacePattern = new RegExp(
-    `(export\\s+interface\\s+${pascalName}\\s*\\{[^}]*?)(\\n})`,
+    `(export\\s+interface\\s+${escapeRegex(pascalName)}\\s*\\{[^}]*?)(\\n})`,
   );
   const match = content.match(interfacePattern);
   if (!match) return null;
@@ -128,11 +130,12 @@ async function injectFieldsIntoZodSchema(
   const content = await fs.readFile(filePath, 'utf-8');
   const previousContent = content;
 
+  assertSafeResourceName(resourceName);
   const pascalName = resourceName.charAt(0).toUpperCase() + resourceName.slice(1);
 
   // Find `create<Name>Schema = z.object({...})`
   const schemaPattern = new RegExp(
-    `(export\\s+const\\s+create${pascalName}Schema\\s*=\\s*z\\.object\\(\\{[^}]*?)(\\n\\}\\))`,
+    `(export\\s+const\\s+create${escapeRegex(pascalName)}Schema\\s*=\\s*z\\.object\\(\\{[^}]*?)(\\n\\}\\))`,
   );
   const match = content.match(schemaPattern);
   if (!match) return null;

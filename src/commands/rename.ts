@@ -7,6 +7,7 @@ import { HistoryManager } from '../core/history/index.js';
 import type { FileOperation } from '../core/history/types.js';
 import { logger, findProjectRoot, withSpinner } from '../utils/index.js';
 import { resolveResourcePath } from '../utils/resolve-resource-path.js';
+import { escapeRegex } from '../utils/sanitize.js';
 
 interface RenameOptions {
   dryRun?: boolean;
@@ -330,6 +331,4 @@ function toCamelCase(name: string): string {
   return pascal.charAt(0).toLowerCase() + pascal.slice(1);
 }
 
-function escapeRegex(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
+// escapeRegex is now imported from utils/sanitize.js

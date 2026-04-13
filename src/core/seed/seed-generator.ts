@@ -4,6 +4,7 @@ import type { PillarConfig } from '../config/index.js';
 import type { MapNode } from '../map/types.js';
 import { MapManager } from '../map/index.js';
 import { resolveResourcePath } from '../../utils/resolve-resource-path.js';
+import { escapeRegex } from '../../utils/sanitize.js';
 
 interface SeedField {
   name: string;
@@ -203,7 +204,7 @@ async function extractFields(
   // Match only the main resource interface to avoid pulling fields from ListResponse, etc.
   const pascalName = resourceName.charAt(0).toUpperCase() + resourceName.slice(1);
   const interfaceRegex = new RegExp(
-    `export\\s+interface\\s+${pascalName}\\s*\\{([^}]*)}`,
+    `export\\s+interface\\s+${escapeRegex(pascalName)}\\s*\\{([^}]*)}`,
   );
   const interfaceMatch = content.match(interfaceRegex);
   if (!interfaceMatch) return fields;

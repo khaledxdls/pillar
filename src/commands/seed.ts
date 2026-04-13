@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import fs from 'fs-extra';
 import chalk from 'chalk';
 import { loadConfig } from '../core/config/index.js';
@@ -116,8 +116,10 @@ export async function seedRunCommand(): Promise<void> {
   logger.blank();
 
   try {
-    const cmd = ext === 'ts' ? `npx tsx ${runnerPath}` : `node ${runnerPath}`;
-    execSync(cmd, { cwd: projectRoot, stdio: 'inherit', timeout: 60_000 });
+    const [command, ...args] = ext === 'ts'
+      ? ['npx', 'tsx', runnerPath]
+      : ['node', runnerPath];
+    execFileSync(command!, args, { cwd: projectRoot, stdio: 'inherit', timeout: 60_000 });
     logger.blank();
     logger.success('Seeds executed successfully');
   } catch {

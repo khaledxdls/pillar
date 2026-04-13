@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import fs from 'fs-extra';
 import type { PillarConfig } from '../config/index.js';
 import { MapManager } from '../map/index.js';
@@ -414,10 +414,11 @@ async function checkTypeScript(projectRoot: string): Promise<DiagnosticCheck> {
   }
 
   try {
-    execSync(`${tscPath} --noEmit --pretty false 2>&1`, {
+    execFileSync(tscPath, ['--noEmit', '--pretty', 'false'], {
       cwd: projectRoot,
       timeout: 30000,
       encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
     return { name: 'Type checking', status: 'pass', message: 'No TypeScript errors' };
   } catch (err: unknown) {

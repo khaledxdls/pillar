@@ -3,6 +3,7 @@ import fs from 'fs-extra';
 import type { PillarConfig } from '../config/index.js';
 import { MapManager } from '../map/index.js';
 import type { MapNode } from '../map/types.js';
+import { escapeRegex } from '../../utils/sanitize.js';
 
 interface OpenAPISpec {
   openapi: string;
@@ -228,7 +229,7 @@ async function extractFieldsFromSource(projectRoot: string, typesRelPath: string
   // Match only the main resource interface (e.g., "export interface User { ... }")
   // This avoids pulling fields from ListResponse, CreateInput, etc.
   const interfaceRegex = new RegExp(
-    `export\\s+interface\\s+${pascalName}\\s*\\{([^}]*)}`,
+    `export\\s+interface\\s+${escapeRegex(pascalName)}\\s*\\{([^}]*)}`,
   );
   const interfaceMatch = content.match(interfaceRegex);
   if (!interfaceMatch) return fields;

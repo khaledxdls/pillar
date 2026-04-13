@@ -2,6 +2,7 @@ import type { PillarConfig } from '../config/index.js';
 import type { GeneratedFile, GeneratorContext, ResourceField } from './types.js';
 import { generateSkeleton } from './skeleton.js';
 import { resolveResourcePath } from '../../utils/resolve-resource-path.js';
+import { escapeRegex } from '../../utils/sanitize.js';
 
 interface ResourceOptions {
   name: string;
@@ -136,7 +137,7 @@ function injectFieldsIntoContent(
 
     // Insert fields into the main interface
     content = content.replace(
-      new RegExp(`(export\\s+interface\\s+${pascalName}\\s*\\{[^}]*?)(\\n})`),
+      new RegExp(`(export\\s+interface\\s+${escapeRegex(pascalName)}\\s*\\{[^}]*?)(\\n})`),
       `$1\n${fieldLines}\n}`,
     );
 
@@ -165,7 +166,7 @@ function injectFieldsIntoContent(
       .map((f) => `  ${f.name}${f.required === false ? '?' : ''}: ${TS_TYPE_MAP[f.type.toLowerCase()] ?? 'string'};`)
       .join('\n');
     content = content.replace(
-      new RegExp(`(export\\s+interface\\s+${pascalName}\\s*\\{[^}]*?)(\\n})`),
+      new RegExp(`(export\\s+interface\\s+${escapeRegex(pascalName)}\\s*\\{[^}]*?)(\\n})`),
       `$1\n${fieldLines}\n}`,
     );
   }

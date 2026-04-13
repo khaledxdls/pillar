@@ -3,6 +3,7 @@ import fs from 'fs-extra';
 import type { PillarConfig } from '../config/index.js';
 import type { FileOperation } from '../history/types.js';
 import { resolveResourcePath } from '../../utils/resolve-resource-path.js';
+import { escapeRegex, assertSafeResourceName } from '../../utils/sanitize.js';
 
 export type RelationType = 'one-to-one' | 'one-to-many' | 'many-to-many';
 
@@ -144,9 +145,10 @@ async function injectRelationField(
   // Skip if field already exists
   if (content.includes(`${fieldName}:`) || content.includes(`${fieldName}?:`)) return null;
 
+  assertSafeResourceName(resourceName);
   const pascalName = resourceName.charAt(0).toUpperCase() + resourceName.slice(1);
   const interfacePattern = new RegExp(
-    `(export\\s+interface\\s+${pascalName}\\s*\\{[^}]*?)(\\n})`,
+    `(export\\s+interface\\s+${escapeRegex(pascalName)}\\s*\\{[^}]*?)(\\n})`,
   );
   const match = content.match(interfacePattern);
   if (!match) return null;
@@ -210,7 +212,7 @@ async function injectImportIfMissing(filePath: string, importLine: string, typeN
   const content = await fs.readFile(filePath, 'utf-8');
 
   // Skip if the type is already imported
-  if (content.includes(`import`) && content.includes(typeName) && content.match(new RegExp(`import.*\\b${typeName}\\b.*from`))) {
+  if (content.includes(`import`) && content.includes(typeName) && content.match(new RegExp(`import.*\\b${escapeRegex(typeName)}\\b.*from`))) {
     return;
   }
 
