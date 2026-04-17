@@ -1,10 +1,10 @@
 {
   "name": "@pillar-cli/pillar",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "AI-aware architecture engine — scaffold, generate, and maintain production-ready projects",
   "type": "module",
   "bin": {
-    "pillar": "./dist/bin/pillar.js"
+    "pillar": "dist/bin/pillar.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
