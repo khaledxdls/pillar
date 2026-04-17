@@ -5,7 +5,7 @@ import type { MapNode } from '../map/types.js';
 import { MapManager } from '../map/index.js';
 import { resolveResourceFilePath } from '../../utils/resolve-resource-path.js';
 import type { Architecture } from '../../utils/constants.js';
-import { escapeRegex } from '../../utils/sanitize.js';
+import { toPascalCase, findInterfaceBlock } from '../../utils/naming.js';
 
 interface SeedField {
   name: string;
@@ -38,7 +38,7 @@ export async function generateSeedFile(
   // Try to read fields from existing types/model
   const fields = await extractFields(projectRoot, arch, resourceName, ext);
 
-  const pascalName = resourceName.charAt(0).toUpperCase() + resourceName.slice(1);
+  const pascalName = toPascalCase(resourceName);
 
   const content = generateSeedContent({
     resourceName,
@@ -200,15 +200,13 @@ async function extractFields(
   const content = await fs.readFile(targetPath, 'utf-8');
   const fields: SeedField[] = [];
 
-  // Match only the main resource interface to avoid pulling fields from ListResponse, etc.
-  const pascalName = resourceName.charAt(0).toUpperCase() + resourceName.slice(1);
-  const interfaceRegex = new RegExp(
-    `export\\s+interface\\s+${escapeRegex(pascalName)}\\s*\\{([^}]*)}`,
-  );
-  const interfaceMatch = content.match(interfaceRegex);
-  if (!interfaceMatch) return fields;
+  const pascalName = toPascalCase(resourceName);
+  const block = findInterfaceBlock(content, pascalName);
+  if (!block) return fields;
 
-  const interfaceBody = interfaceMatch[1]!;
+  // Strip nested object bodies so the field-line regex doesn't pick up keys
+  // from inline objects like `settings: { theme: string }`.
+  const interfaceBody = stripNestedBraces(block.body);
   const fieldRegex = /^\s+(\w+)\??\s*:\s*(\w+)/gm;
   let match: RegExpExecArray | null;
 
@@ -262,6 +260,17 @@ function mapToTSType(type: string): string {
 
 function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function stripNestedBraces(body: string): string {
+  let out = '';
+  let depth = 0;
+  for (const ch of body) {
+    if (ch === '{') { depth++; continue; }
+    if (ch === '}') { depth = Math.max(0, depth - 1); continue; }
+    if (depth === 0) out += ch;
+  }
+  return out;
 }
 
 

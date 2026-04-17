@@ -9,6 +9,7 @@ import { generateSkeleton } from '../core/generator/skeleton.js';
 import type { ResourceField } from '../core/generator/types.js';
 import { logger, findProjectRoot, withSpinner } from '../utils/index.js';
 import { resolveResourcePath, resolveResourceFilePath } from '../utils/resolve-resource-path.js';
+import { toPascalCase, toCamelCase, pluralizeResource } from '../utils/naming.js';
 
 interface AddResourceOptions {
   fields?: string;
@@ -218,8 +219,10 @@ async function wireRouteIntoApp(
   const ext = config.project.language === 'typescript' ? 'ts' : 'js';
   const stack = config.project.stack;
 
-  // NestJS and Next.js handle routing differently
-  if (stack === 'nestjs' || stack === 'nextjs') return null;
+  if (stack === 'nextjs') return null;
+  if (stack === 'nestjs') {
+    return wireIntoNestAppModule(projectRoot, config, resourceName, ext);
+  }
 
   const appPath = path.join(projectRoot, `src/app.${ext}`);
   if (!(await fs.pathExists(appPath))) return null;
@@ -227,63 +230,45 @@ async function wireRouteIntoApp(
   const content = await fs.readFile(appPath, 'utf-8');
   const previousContent = content;
 
-  const pascalName = resourceName.charAt(0).toUpperCase() + resourceName.slice(1);
-  const camelName = resourceName.charAt(0).toLowerCase() + resourceName.slice(1);
+  const camelName = toCamelCase(resourceName);
+  const pluralPath = pluralizeResource(camelName);
 
-  // Compute relative import path from src/app.ts to the routes file
   const routesFilePath = resolveResourceFilePath(config.project.architecture, resourceName, 'routes', ext);
   const routesRelPath = `./${path.relative('src', routesFilePath).replace(/\.ts$/, '.js')}`;
 
   let importLine: string;
   let registrationLine: string;
+  let registrationPattern: RegExp;
 
   switch (stack) {
     case 'fastify':
       importLine = `import { ${camelName}Routes } from '${routesRelPath}';`;
-      registrationLine = `app.register(${camelName}Routes);`;
+      registrationLine = `  app.register(${camelName}Routes);`;
+      registrationPattern = new RegExp(`app\\.register\\(\\s*${camelName}Routes\\s*\\)`);
       break;
     case 'hono':
       importLine = `import { ${camelName}Routes } from '${routesRelPath}';`;
-      registrationLine = `app.route('/${camelName}s', ${camelName}Routes);`;
+      registrationLine = `app.route('/${pluralPath}', ${camelName}Routes);`;
+      registrationPattern = new RegExp(`app\\.route\\([^)]*${camelName}Routes`);
       break;
     default:
-      // Express
       importLine = `import { ${camelName}Router } from '${routesRelPath}';`;
-      registrationLine = `app.use('/${camelName}s', ${camelName}Router);`;
+      registrationLine = `app.use('/${pluralPath}', ${camelName}Router);`;
+      registrationPattern = new RegExp(`app\\.use\\([^)]*${camelName}Router`);
       break;
   }
 
-  // Skip if already wired
-  if (content.includes(importLine) || content.includes(registrationLine)) return null;
+  // Skip if both pieces are already present
+  if (content.includes(importLine) && registrationPattern.test(content)) return null;
 
   let updated = content;
 
-  // Add import after the last existing import
-  const lines = updated.split('\n');
-  let lastImportIndex = -1;
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i]!.trim().startsWith('import ')) {
-      lastImportIndex = i;
-    }
+  if (!content.includes(importLine)) {
+    updated = insertImport(updated, importLine);
   }
-  if (lastImportIndex >= 0) {
-    lines.splice(lastImportIndex + 1, 0, importLine);
-  } else {
-    lines.unshift(importLine);
-  }
-  updated = lines.join('\n');
 
-  // Add registration before the TODO comment or export
-  const todoMatch = updated.match(/^[ \t]*\/\/\s*TODO:?\s*register.*$/m);
-  if (todoMatch && todoMatch.index !== undefined) {
-    // Replace the TODO comment with the registration line
-    updated = updated.replace(todoMatch[0], `${registrationLine}`);
-  } else {
-    // Insert before export
-    const exportMatch = updated.match(/\nexport\s/);
-    if (exportMatch && exportMatch.index !== undefined) {
-      updated = updated.slice(0, exportMatch.index) + `\n${registrationLine}\n` + updated.slice(exportMatch.index);
-    }
+  if (!registrationPattern.test(updated)) {
+    updated = insertRegistration(updated, registrationLine, stack);
   }
 
   if (updated === previousContent) return null;
@@ -296,6 +281,153 @@ async function wireRouteIntoApp(
       previousContent,
     },
   };
+}
+
+function toImportPath(relPath: string): string {
+  let p = relPath.replace(/\\/g, '/').replace(/\.tsx?$/, '.js');
+  if (!p.startsWith('.')) p = './' + p;
+  return p;
+}
+
+function insertImport(content: string, importLine: string): string {
+  const lines = content.split('\n');
+  let lastImportIndex = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i]!.trim().startsWith('import ')) lastImportIndex = i;
+  }
+  if (lastImportIndex >= 0) {
+    lines.splice(lastImportIndex + 1, 0, importLine);
+  } else {
+    lines.unshift(importLine);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Insert a route-registration line. Strategy, in priority order:
+ *   1. Replace an explicit `// TODO: register …` comment if present.
+ *   2. For Fastify, insert before the closing `}` of the `buildApp`/async
+ *      factory function (registrations must live inside the function body).
+ *   3. Insert before the first `app.listen(` call.
+ *   4. Insert before the first `export ` statement.
+ *   5. Append to end of file.
+ *
+ * The previous implementation depended on either the TODO or a trailing
+ * export being present; if users deleted the TODO and there was no export
+ * (e.g., Fastify factory files), registrations were silently dropped.
+ */
+function insertRegistration(content: string, registrationLine: string, stack: string): string {
+  const todoMatch = content.match(/^[ \t]*\/\/\s*TODO:?\s*register.*$/m);
+  if (todoMatch && todoMatch.index !== undefined) {
+    return content.replace(todoMatch[0], registrationLine.replace(/^\s+/, ''));
+  }
+
+  if (stack === 'fastify') {
+    // Insert before the last `}` that closes the async factory function.
+    // Heuristic: find `return app;` or `return fastify` and inject before it.
+    const returnMatch = content.match(/^\s*return\s+(?:app|fastify)\s*;?\s*$/m);
+    if (returnMatch && returnMatch.index !== undefined) {
+      return content.slice(0, returnMatch.index) + registrationLine + '\n' + content.slice(returnMatch.index);
+    }
+  }
+
+  const listenMatch = content.match(/^[ \t]*(?:await\s+)?(?:app|server)\.listen\s*\(/m);
+  if (listenMatch && listenMatch.index !== undefined) {
+    return content.slice(0, listenMatch.index) + registrationLine + '\n' + content.slice(listenMatch.index);
+  }
+
+  const exportMatch = content.match(/\nexport\s/);
+  if (exportMatch && exportMatch.index !== undefined) {
+    return content.slice(0, exportMatch.index) + `\n${registrationLine}\n` + content.slice(exportMatch.index);
+  }
+
+  return content.trimEnd() + '\n\n' + registrationLine + '\n';
+}
+
+/**
+ * NestJS auto-wires controllers/providers through the `AppModule`'s
+ * `@Module({ controllers, providers })` decorator. We locate the module
+ * file, add imports for the new controller/service, and extend those
+ * arrays. If we can't find a safe spot we return `null` rather than
+ * corrupting the module.
+ */
+async function wireIntoNestAppModule(
+  projectRoot: string,
+  config: PillarConfig,
+  resourceName: string,
+  ext: string,
+): Promise<{ operation: FileOperation } | null> {
+  const candidates = [
+    `src/app.module.${ext}`,
+    `src/app/app.module.${ext}`,
+  ];
+  let modulePath: string | null = null;
+  for (const rel of candidates) {
+    if (await fs.pathExists(path.join(projectRoot, rel))) {
+      modulePath = rel;
+      break;
+    }
+  }
+  if (!modulePath) return null;
+
+  const fullPath = path.join(projectRoot, modulePath);
+  const content = await fs.readFile(fullPath, 'utf-8');
+  const previousContent = content;
+
+  const pascalName = toPascalCase(resourceName);
+  const controllerClass = `${pascalName}Controller`;
+  const serviceClass = `${pascalName}Service`;
+
+  const arch = config.project.architecture;
+  const controllerAbs = resolveResourceFilePath(arch, resourceName, 'controller', ext);
+  const serviceAbs = resolveResourceFilePath(arch, resourceName, 'service', ext);
+  const moduleDir = path.dirname(modulePath);
+  const controllerFile = toImportPath(path.relative(moduleDir, controllerAbs));
+  const serviceFile = toImportPath(path.relative(moduleDir, serviceAbs));
+
+  const controllerImport = `import { ${controllerClass} } from '${controllerFile}';`;
+  const serviceImport = `import { ${serviceClass} } from '${serviceFile}';`;
+
+  let updated = content;
+  if (!updated.includes(controllerClass)) updated = insertImport(updated, controllerImport);
+  if (!updated.includes(serviceClass)) updated = insertImport(updated, serviceImport);
+
+  updated = extendModuleArray(updated, 'controllers', controllerClass);
+  updated = extendModuleArray(updated, 'providers', serviceClass);
+
+  if (updated === previousContent) return null;
+
+  await fs.writeFile(fullPath, updated, 'utf-8');
+  return {
+    operation: { type: 'modify', path: modulePath, previousContent },
+  };
+}
+
+/**
+ * Add `entry` to the `key: [ ... ]` array inside a `@Module({ ... })`
+ * decorator. If the array doesn't exist, create it. Idempotent.
+ */
+function extendModuleArray(content: string, key: string, entry: string): string {
+  // Already present?
+  const presentRe = new RegExp(`${key}\\s*:\\s*\\[[^\\]]*\\b${entry}\\b[^\\]]*\\]`);
+  if (presentRe.test(content)) return content;
+
+  const arrayRe = new RegExp(`(${key}\\s*:\\s*\\[)([\\s\\S]*?)(\\])`);
+  const match = arrayRe.exec(content);
+  if (match) {
+    const existing = match[2]!.trim();
+    const replacement = existing.length === 0
+      ? `${match[1]}${entry}${match[3]}`
+      : `${match[1]}${match[2]!.replace(/\s*$/, '')}${existing.endsWith(',') ? '' : ','} ${entry}${match[3]}`;
+    return content.replace(arrayRe, replacement);
+  }
+
+  // No existing array — inject into the @Module({...}) object.
+  const moduleRe = /@Module\s*\(\s*\{/;
+  const mm = moduleRe.exec(content);
+  if (!mm) return content;
+  const insertAt = mm.index + mm[0].length;
+  return content.slice(0, insertAt) + `\n  ${key}: [${entry}],` + content.slice(insertAt);
 }
 
 /**

@@ -1,6 +1,7 @@
 import type { FileKind, GeneratorContext } from './types.js';
 import type { Stack, Architecture } from '../../utils/constants.js';
 import { LAYERED_DIRS } from '../../utils/resolve-resource-path.js';
+import { toPascalCase as sharedPascal, toCamelCase as sharedCamel, pluralizeResource } from '../../utils/naming.js';
 
 /**
  * Infer the kind of file from its name/extension.
@@ -26,22 +27,8 @@ export function inferFileKind(fileName: string): FileKind {
 /**
  * Derive a PascalCase name from a file name.
  */
-function toPascalCase(name: string): string {
-  return name
-    .replace(/[^a-zA-Z0-9]/g, ' ')
-    .split(' ')
-    .filter(Boolean)
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-    .join('');
-}
-
-/**
- * Derive a camelCase name from a file name.
- */
-function toCamelCase(name: string): string {
-  const pascal = toPascalCase(name);
-  return pascal.charAt(0).toLowerCase() + pascal.slice(1);
-}
+const toPascalCase = sharedPascal;
+const toCamelCase = sharedCamel;
 
 /**
  * Extract the base name (without kind suffix and extension).
@@ -108,7 +95,7 @@ const SKELETON_GENERATORS: Record<FileKind, (p: SkeletonParams) => string> = {
         `import { Controller, Get, Post, Put, Delete, Param, Body } from '@nestjs/common';`,
         `import { ${pascalName}Service } from '${layeredImport(camelName, 'service', architecture)}';`,
         '',
-        `@Controller('${camelName}s')`,
+        `@Controller('${pluralizeResource(camelName)}')`,
         `export class ${pascalName}Controller {`,
         `  constructor(private readonly ${camelName}Service: ${pascalName}Service) {}`,
         '',
@@ -364,11 +351,11 @@ const SKELETON_GENERATORS: Record<FileKind, (p: SkeletonParams) => string> = {
         `const controller = new ${pascalName}Controller();`,
         '',
         `export async function ${camelName}Routes(app${isTS ? ': FastifyInstance' : ''}) {`,
-        `  app.get('/${camelName}s', (req, res) => controller.findAll(req, res));`,
-        `  app.get('/${camelName}s/:id', (req, res) => controller.findOne(req, res));`,
-        `  app.post('/${camelName}s', (req, res) => controller.create(req, res));`,
-        `  app.put('/${camelName}s/:id', (req, res) => controller.update(req, res));`,
-        `  app.delete('/${camelName}s/:id', (req, res) => controller.remove(req, res));`,
+        `  app.get('/${pluralizeResource(camelName)}', (req, res) => controller.findAll(req, res));`,
+        `  app.get('/${pluralizeResource(camelName)}/:id', (req, res) => controller.findOne(req, res));`,
+        `  app.post('/${pluralizeResource(camelName)}', (req, res) => controller.create(req, res));`,
+        `  app.put('/${pluralizeResource(camelName)}/:id', (req, res) => controller.update(req, res));`,
+        `  app.delete('/${pluralizeResource(camelName)}/:id', (req, res) => controller.remove(req, res));`,
         '}',
         '',
       ].join('\n');

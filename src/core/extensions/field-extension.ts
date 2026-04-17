@@ -3,7 +3,8 @@ import fs from 'fs-extra';
 import type { PillarConfig } from '../config/index.js';
 import type { FileOperation } from '../history/types.js';
 import { resolveResourceFilePath } from '../../utils/resolve-resource-path.js';
-import { escapeRegex, assertSafeResourceName } from '../../utils/sanitize.js';
+import { assertSafeResourceName } from '../../utils/sanitize.js';
+import { toPascalCase, findInterfaceBlock } from '../../utils/naming.js';
 
 interface FieldDefinition {
   name: string;
@@ -89,14 +90,10 @@ async function injectFieldsIntoInterface(
   const content = await fs.readFile(filePath, 'utf-8');
   const previousContent = content;
 
-  // Find the main interface (PascalCase of resource name)
   assertSafeResourceName(resourceName);
-  const pascalName = resourceName.charAt(0).toUpperCase() + resourceName.slice(1);
-  const interfacePattern = new RegExp(
-    `(export\\s+interface\\s+${escapeRegex(pascalName)}\\s*\\{[^}]*?)(\\n})`,
-  );
-  const match = content.match(interfacePattern);
-  if (!match) return null;
+  const pascalName = toPascalCase(resourceName);
+  const block = findInterfaceBlock(content, pascalName);
+  if (!block) return null;
 
   const newFields = fields
     .map((f) => {
@@ -105,10 +102,13 @@ async function injectFieldsIntoInterface(
     })
     .join('\n');
 
-  const updated = content.replace(
-    interfacePattern,
-    `$1\n${newFields}\n}`,
-  );
+  const body = block.body.replace(/\s+$/, '');
+  const separator = body.length === 0 ? '' : '\n';
+  const updated =
+    content.slice(0, block.openBrace + 1) +
+    body +
+    `${separator}\n${newFields}\n` +
+    content.slice(block.closeBrace);
 
   if (updated === content) return null;
 
@@ -131,26 +131,29 @@ async function injectFieldsIntoZodSchema(
   const previousContent = content;
 
   assertSafeResourceName(resourceName);
-  const pascalName = resourceName.charAt(0).toUpperCase() + resourceName.slice(1);
+  const pascalName = toPascalCase(resourceName);
 
-  // Find `create<Name>Schema = z.object({...})`
-  const schemaPattern = new RegExp(
-    `(export\\s+const\\s+create${escapeRegex(pascalName)}Schema\\s*=\\s*z\\.object\\(\\{[^}]*?)(\\n\\}\\))`,
+  const header = new RegExp(
+    `export\\s+const\\s+create${pascalName.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}Schema\\s*=\\s*z\\.object\\(\\s*\\{`,
   );
-  const match = content.match(schemaPattern);
-  if (!match) return null;
+  const headerMatch = header.exec(content);
+  if (!headerMatch) return null;
 
+  const openBrace = headerMatch.index + headerMatch[0].length - 1;
+  const closeBrace = findBalancedClose(content, openBrace);
+  if (closeBrace === -1) return null;
+
+  const body = content.slice(openBrace + 1, closeBrace).replace(/\s+$/, '');
   const newFields = fields
-    .map((f) => {
-      const zodType = mapToZodType(f.type, f.optional);
-      return `  ${f.name}: ${zodType},`;
-    })
+    .map((f) => `  ${f.name}: ${mapToZodType(f.type, f.optional)},`)
     .join('\n');
 
-  const updated = content.replace(
-    schemaPattern,
-    `$1\n${newFields}\n})`,
-  );
+  const separator = body.length === 0 ? '' : '\n';
+  const updated =
+    content.slice(0, openBrace + 1) +
+    body +
+    `${separator}\n${newFields}\n` +
+    content.slice(closeBrace);
 
   if (updated === content) return null;
 
@@ -162,6 +165,37 @@ async function injectFieldsIntoZodSchema(
       previousContent,
     },
   };
+}
+
+/**
+ * Scan `content` for the `}` that closes the `{` at `openIndex`, ignoring
+ * braces inside strings/comments. Returns -1 if unbalanced.
+ */
+function findBalancedClose(content: string, openIndex: number): number {
+  let depth = 0;
+  let inString: '"' | "'" | '`' | null = null;
+  let inLineComment = false;
+  let inBlockComment = false;
+
+  for (let i = openIndex; i < content.length; i++) {
+    const ch = content[i]!;
+    const prev = i > 0 ? content[i - 1] : '';
+
+    if (inLineComment) { if (ch === '\n') inLineComment = false; continue; }
+    if (inBlockComment) { if (ch === '/' && prev === '*') inBlockComment = false; continue; }
+    if (inString) { if (ch === inString && prev !== '\\') inString = null; continue; }
+
+    if (ch === '/' && content[i + 1] === '/') { inLineComment = true; continue; }
+    if (ch === '/' && content[i + 1] === '*') { inBlockComment = true; continue; }
+    if (ch === '"' || ch === "'" || ch === '`') { inString = ch; continue; }
+
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
 }
 
 function mapToTSType(type: string): string {

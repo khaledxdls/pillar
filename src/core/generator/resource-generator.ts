@@ -2,7 +2,7 @@ import type { PillarConfig } from '../config/index.js';
 import type { GeneratedFile, GeneratorContext, ResourceField } from './types.js';
 import { generateSkeleton } from './skeleton.js';
 import { resolveResourcePath, LAYERED_DIRS } from '../../utils/resolve-resource-path.js';
-import { escapeRegex } from '../../utils/sanitize.js';
+import { toPascalCase, findInterfaceBlock } from '../../utils/naming.js';
 
 interface ResourceOptions {
   name: string;
@@ -116,19 +116,14 @@ function injectFieldsIntoContent(
   suffix: string,
   resourceName: string,
 ): string {
-  const pascalName = resourceName.charAt(0).toUpperCase() + resourceName.slice(1);
+  const pascalName = toPascalCase(resourceName);
 
   if (suffix === 'model') {
-    // Inject fields into the main interface before the closing }
     const fieldLines = fields
       .map((f) => `  ${f.name}${f.required === false ? '?' : ''}: ${TS_TYPE_MAP[f.type.toLowerCase()] ?? 'string'};`)
       .join('\n');
 
-    // Insert fields into the main interface
-    content = content.replace(
-      new RegExp(`(export\\s+interface\\s+${escapeRegex(pascalName)}\\s*\\{[^}]*?)(\\n})`),
-      `$1\n${fieldLines}\n}`,
-    );
+    content = injectIntoInterface(content, pascalName, fieldLines);
 
     // Replace TODO in CreateInput
     const createFields = fields
@@ -150,14 +145,10 @@ function injectFieldsIntoContent(
   }
 
   if (suffix === 'types') {
-    // Inject fields into the main interface
     const fieldLines = fields
       .map((f) => `  ${f.name}${f.required === false ? '?' : ''}: ${TS_TYPE_MAP[f.type.toLowerCase()] ?? 'string'};`)
       .join('\n');
-    content = content.replace(
-      new RegExp(`(export\\s+interface\\s+${escapeRegex(pascalName)}\\s*\\{[^}]*?)(\\n})`),
-      `$1\n${fieldLines}\n}`,
-    );
+    content = injectIntoInterface(content, pascalName, fieldLines);
   }
 
   if (suffix === 'validator') {
@@ -182,4 +173,17 @@ function injectFieldsIntoContent(
   }
 
   return content;
+}
+
+function injectIntoInterface(content: string, pascalName: string, fieldLines: string): string {
+  const block = findInterfaceBlock(content, pascalName);
+  if (!block) return content;
+  const body = block.body.replace(/\s+$/, '');
+  const separator = body.length === 0 ? '' : '\n';
+  return (
+    content.slice(0, block.openBrace + 1) +
+    body +
+    `${separator}\n${fieldLines}\n` +
+    content.slice(block.closeBrace)
+  );
 }

@@ -3,7 +3,7 @@ import fs from 'fs-extra';
 import type { PillarConfig } from '../config/index.js';
 import { MapManager } from '../map/index.js';
 import type { MapNode } from '../map/types.js';
-import { escapeRegex } from '../../utils/sanitize.js';
+import { toPascalCase, pluralizeResource, findInterfaceBlock } from '../../utils/naming.js';
 
 interface OpenAPISpec {
   openapi: string;
@@ -74,8 +74,9 @@ export async function generateOpenAPISpec(
   const resources = discoverResources(map.structure, config);
 
   for (const resource of resources) {
-    const basePath = `/${resource.name}s`;
-    const pascalName = resource.name.charAt(0).toUpperCase() + resource.name.slice(1);
+    const basePath = `/${pluralizeResource(resource.name)}`;
+    const pascalName = toPascalCase(resource.name);
+    const pluralPascal = toPascalCase(pluralizeResource(resource.name));
     const tag = pascalName;
 
     // Read the types/model file to extract fields
@@ -99,15 +100,22 @@ export async function generateOpenAPISpec(
       required: fields.filter((f) => !f.optional).map((f) => f.name),
     };
 
+    // Update payload: all fields optional (PATCH-friendly).
+    spec.components.schemas[`Update${pascalName}Input`] = {
+      type: 'object',
+      properties: Object.fromEntries(fields.map((f) => [f.name, { type: mapToOpenAPIType(f.type) }])),
+    };
+
     // Build paths
+    const pluralReadable = pluralizeResource(resource.name);
     spec.paths[basePath] = {
       get: {
-        summary: `List all ${resource.name}s`,
-        operationId: `findAll${pascalName}s`,
+        summary: `List all ${pluralReadable}`,
+        operationId: `findAll${pluralPascal}`,
         tags: [tag],
         responses: {
           '200': {
-            description: `List of ${resource.name}s`,
+            description: `List of ${pluralReadable}`,
             content: { 'application/json': { schema: { type: 'array', items: { $ref: `#/components/schemas/${pascalName}` } } } },
           },
         },
@@ -150,7 +158,7 @@ export async function generateOpenAPISpec(
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
         requestBody: {
           required: true,
-          content: { 'application/json': { schema: { $ref: `#/components/schemas/Create${pascalName}Input` } } },
+          content: { 'application/json': { schema: { $ref: `#/components/schemas/Update${pascalName}Input` } } },
         },
         responses: {
           '200': {
@@ -222,19 +230,14 @@ async function extractFieldsFromSource(projectRoot: string, typesRelPath: string
   const content = await fs.readFile(fullPath, 'utf-8');
   const fields: FieldInfo[] = [];
 
-  // Extract the resource name from the file path to find the main interface
   const baseName = path.basename(typesRelPath).replace(/\.(types|model)\.\w+$/, '');
-  const pascalName = baseName.charAt(0).toUpperCase() + baseName.slice(1);
+  const pascalName = toPascalCase(baseName);
 
-  // Match only the main resource interface (e.g., "export interface User { ... }")
-  // This avoids pulling fields from ListResponse, CreateInput, etc.
-  const interfaceRegex = new RegExp(
-    `export\\s+interface\\s+${escapeRegex(pascalName)}\\s*\\{([^}]*)}`,
-  );
-  const interfaceMatch = content.match(interfaceRegex);
-  if (!interfaceMatch) return fields;
+  const block = findInterfaceBlock(content, pascalName);
+  if (!block) return fields;
 
-  const interfaceBody = interfaceMatch[1]!;
+  // Strip nested object literals so their keys don't leak into the field list.
+  const interfaceBody = stripNestedObjects(block.body);
 
   // Match interface fields within the main interface body only
   const fieldRegex = /^\s+(\w+)(\?)?\s*:\s*(\w+)/gm;
@@ -254,6 +257,17 @@ async function extractFieldsFromSource(projectRoot: string, typesRelPath: string
   }
 
   return fields;
+}
+
+function stripNestedObjects(body: string): string {
+  let out = '';
+  let depth = 0;
+  for (const ch of body) {
+    if (ch === '{') { depth++; continue; }
+    if (ch === '}') { depth = Math.max(0, depth - 1); continue; }
+    if (depth === 0) out += ch;
+  }
+  return out;
 }
 
 function mapToOpenAPIType(tsType: string): string {

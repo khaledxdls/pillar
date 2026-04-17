@@ -7,3 +7,12 @@ export * from './constants.js';
 export * from './errors.js';
 export { generateDiff, generateCreatePreview } from './diff.js';
 export { escapeRegex, assertSafeResourceName } from './sanitize.js';
+export {
+  toPascalCase,
+  toCamelCase,
+  toKebabCase,
+  pluralize,
+  pluralizeResource,
+  findInterfaceBlock,
+} from './naming.js';
+export type { InterfaceBlock } from './naming.js';

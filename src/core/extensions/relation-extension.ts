@@ -4,6 +4,7 @@ import type { PillarConfig } from '../config/index.js';
 import type { FileOperation } from '../history/types.js';
 import { resolveResourceFilePath } from '../../utils/resolve-resource-path.js';
 import { escapeRegex, assertSafeResourceName } from '../../utils/sanitize.js';
+import { toPascalCase, pluralizeResource, findInterfaceBlock } from '../../utils/naming.js';
 
 export type RelationType = 'one-to-one' | 'one-to-many' | 'many-to-many';
 
@@ -39,8 +40,8 @@ export async function addRelationToResource(
 
   const { sourceField, sourceType, inverseField, inverseType } = deriveFieldNames(relation);
 
-  const targetPascal = relation.targetResource.charAt(0).toUpperCase() + relation.targetResource.slice(1);
-  const sourcePascal = relation.sourceResource.charAt(0).toUpperCase() + relation.sourceResource.slice(1);
+  const targetPascal = toPascalCase(relation.targetResource);
+  const sourcePascal = toPascalCase(relation.sourceResource);
 
   // 1. Update source types/model
   for (const suffix of ['types', 'model'] as const) {
@@ -124,29 +125,31 @@ function deriveFieldNames(relation: RelationDefinition): {
 } {
   const target = relation.targetResource;
   const source = relation.sourceResource;
-  const targetPascal = target.charAt(0).toUpperCase() + target.slice(1);
-  const sourcePascal = source.charAt(0).toUpperCase() + source.slice(1);
+  const targetPascal = toPascalCase(target);
+  const sourcePascal = toPascalCase(source);
+  const targetPlural = pluralizeResource(target);
+  const sourcePlural = pluralizeResource(source);
 
   switch (relation.type) {
     case 'one-to-one':
       return {
         sourceField: target,
-        sourceType: `${targetPascal}`,
+        sourceType: targetPascal,
         inverseField: source,
-        inverseType: `${sourcePascal}`,
+        inverseType: sourcePascal,
       };
     case 'one-to-many':
       return {
-        sourceField: `${target}s`,
+        sourceField: targetPlural,
         sourceType: `${targetPascal}[]`,
         inverseField: source,
-        inverseType: `${sourcePascal}`,
+        inverseType: sourcePascal,
       };
     case 'many-to-many':
       return {
-        sourceField: `${target}s`,
+        sourceField: targetPlural,
         sourceType: `${targetPascal}[]`,
-        inverseField: `${source}s`,
+        inverseField: sourcePlural,
         inverseType: `${sourcePascal}[]`,
       };
   }
@@ -165,18 +168,21 @@ async function injectRelationField(
   if (content.includes(`${fieldName}:`) || content.includes(`${fieldName}?:`)) return null;
 
   assertSafeResourceName(resourceName);
-  const pascalName = resourceName.charAt(0).toUpperCase() + resourceName.slice(1);
-  const interfacePattern = new RegExp(
-    `(export\\s+interface\\s+${escapeRegex(pascalName)}\\s*\\{[^}]*?)(\\n})`,
-  );
-  const match = content.match(interfacePattern);
-  if (!match) return null;
+  const pascalName = toPascalCase(resourceName);
+  const block = findInterfaceBlock(content, pascalName);
+  if (!block) return null;
 
   const line = isTS
     ? `  ${fieldName}?: ${fieldType};`
     : `  ${fieldName}: null,`;
 
-  const updated = content.replace(interfacePattern, `$1\n${line}\n}`);
+  const body = block.body.replace(/\s+$/, '');
+  const separator = body.length === 0 ? '' : '\n';
+  const updated =
+    content.slice(0, block.openBrace + 1) +
+    body +
+    `${separator}\n${line}\n` +
+    content.slice(block.closeBrace);
   if (updated === content) return null;
 
   const previousContent = content;
@@ -193,10 +199,10 @@ async function injectRelationMethod(
   const previousContent = content;
 
   const target = relation.targetResource;
-  const targetPascal = target.charAt(0).toUpperCase() + target.slice(1);
+  const targetPascal = toPascalCase(target);
   const methodName = relation.type === 'one-to-one'
     ? `find${targetPascal}`
-    : `find${targetPascal}s`;
+    : `find${toPascalCase(pluralizeResource(target))}`;
 
   // Skip if method already exists
   if (content.includes(`${methodName}(`)) return null;

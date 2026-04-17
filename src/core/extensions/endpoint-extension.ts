@@ -4,6 +4,7 @@ import type { PillarConfig } from '../config/index.js';
 import type { FileOperation } from '../history/types.js';
 import { resolveResourceFilePath } from '../../utils/resolve-resource-path.js';
 import type { Stack } from '../../utils/constants.js';
+import { toCamelCase, pluralizeResource } from '../../utils/naming.js';
 
 interface EndpointDefinition {
   method: string;
@@ -34,7 +35,7 @@ export function parseEndpointDef(raw: string, resourceName?: string): EndpointDe
   // Strip the resource name prefix from the path to avoid duplication
   // e.g., "/users/:id/posts" on the user router becomes "/:id/posts"
   if (resourceName) {
-    const prefix = `/${resourceName}s`;
+    const prefix = `/${pluralizeResource(resourceName)}`;
     if (routePath.startsWith(prefix)) {
       routePath = routePath.slice(prefix.length) || '/';
     }
@@ -180,13 +181,14 @@ async function injectRouteLine(
   const content = await fs.readFile(routesPath, 'utf-8');
   const previousContent = content;
   const methodLower = endpoint.method.toLowerCase();
-  const camelName = resourceName.charAt(0).toLowerCase() + resourceName.slice(1);
+  const camelName = toCamelCase(resourceName);
+  const pluralPath = pluralizeResource(toCamelCase(resourceName));
 
   let routeLine: string;
 
   switch (stack) {
     case 'fastify':
-      routeLine = `  app.${methodLower}('/${camelName}s${endpoint.path}', (req, res) => controller.${endpoint.handlerName}(req, res));`;
+      routeLine = `  app.${methodLower}('/${pluralPath}${endpoint.path}', (req, res) => controller.${endpoint.handlerName}(req, res));`;
       break;
     case 'hono':
       routeLine = `${camelName}Routes.${methodLower}('${endpoint.path}', (c) => controller.${endpoint.handlerName}(c));`;
