@@ -2,7 +2,7 @@ import path from 'node:path';
 import fs from 'fs-extra';
 import type { PillarConfig } from '../config/index.js';
 import type { FileOperation } from '../history/types.js';
-import { resolveResourcePath } from '../../utils/resolve-resource-path.js';
+import { resolveResourceFilePath } from '../../utils/resolve-resource-path.js';
 import type { Stack } from '../../utils/constants.js';
 
 interface EndpointDefinition {
@@ -56,12 +56,12 @@ export async function addEndpointToResource(
   const ext = config.project.language === 'typescript' ? 'ts' : 'js';
   const isTS = config.project.language === 'typescript';
   const stack = config.project.stack;
-  const basePath = resolveResourcePath(config.project.architecture, resourceName);
+  const arch = config.project.architecture;
   const operations: FileOperation[] = [];
   const modifiedFiles: string[] = [];
 
   // Add method to controller
-  const controllerPath = path.join(projectRoot, basePath, `${resourceName}.controller.${ext}`);
+  const controllerPath = path.join(projectRoot, resolveResourceFilePath(arch, resourceName, 'controller', ext));
   if (await fs.pathExists(controllerPath)) {
     const result = await injectControllerMethod(controllerPath, projectRoot, endpoint, purpose, isTS, stack);
     if (result) {
@@ -72,7 +72,7 @@ export async function addEndpointToResource(
 
   // Add route to routes file (not needed for NestJS — decorators handle routing)
   if (stack !== 'nestjs') {
-    const routesPath = path.join(projectRoot, basePath, `${resourceName}.routes.${ext}`);
+    const routesPath = path.join(projectRoot, resolveResourceFilePath(arch, resourceName, 'routes', ext));
     if (await fs.pathExists(routesPath)) {
       const result = await injectRouteLine(routesPath, projectRoot, endpoint, stack, resourceName);
       if (result) {
@@ -144,7 +144,20 @@ function buildControllerMethod(
     ].join('\n');
   }
 
-  // Express / Fastify — both use req, res
+  if (stack === 'fastify') {
+    const reqType = isTS ? 'req: FastifyRequest' : 'req';
+    const resType = isTS ? 'res: FastifyReply' : 'res';
+    return [
+      '',
+      `  // ${purpose}`,
+      `  async ${endpoint.handlerName}(${reqType}, ${resType}) {`,
+      `    // TODO: implement ${endpoint.method} ${endpoint.path}`,
+      `    return res.send({ message: "not implemented" });`,
+      `  }`,
+    ].join('\n');
+  }
+
+  // Express (default)
   const reqType = isTS ? 'req: Request' : 'req';
   const resType = isTS ? 'res: Response' : 'res';
   return [
@@ -184,14 +197,22 @@ async function injectRouteLine(
       break;
   }
 
-  // Insert before the last export or at end of file
-  const exportIndex = content.lastIndexOf('export');
   let updated: string;
 
-  if (exportIndex !== -1) {
-    updated = content.slice(0, exportIndex) + routeLine + '\n\n' + content.slice(exportIndex);
+  if (stack === 'fastify') {
+    // Fastify routes are defined inside a function body — insert before its closing brace
+    const lastBrace = content.lastIndexOf('}');
+    if (lastBrace === -1) return null;
+    updated = content.slice(0, lastBrace) + routeLine + '\n' + content.slice(lastBrace);
   } else {
-    updated = content + `\n${routeLine}\n`;
+    // Express: insert before the trailing export statement
+    // Hono: insert at end of file (routes are module-level)
+    const exportIndex = content.lastIndexOf('export {');
+    if (exportIndex !== -1) {
+      updated = content.slice(0, exportIndex) + routeLine + '\n\n' + content.slice(exportIndex);
+    } else {
+      updated = content.trimEnd() + '\n' + routeLine + '\n';
+    }
   }
 
   await fs.writeFile(routesPath, updated, 'utf-8');

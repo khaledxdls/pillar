@@ -1,5 +1,6 @@
 import type { FileKind, GeneratorContext } from './types.js';
-import type { Stack } from '../../utils/constants.js';
+import type { Stack, Architecture } from '../../utils/constants.js';
+import { LAYERED_DIRS } from '../../utils/resolve-resource-path.js';
 
 /**
  * Infer the kind of file from its name/extension.
@@ -68,11 +69,12 @@ export function generateSkeleton(
   const stack = context?.stack;
 
   const testFramework = context?.testFramework;
+  const architecture = context?.architecture;
 
   const header = `// Purpose: ${purpose}\n\n`;
 
   const generator = SKELETON_GENERATORS[kind];
-  return header + generator({ baseName, pascalName, camelName, isTS, stack, testFramework, purpose });
+  return header + generator({ baseName, pascalName, camelName, isTS, stack, testFramework, purpose, architecture });
 }
 
 interface SkeletonParams {
@@ -83,14 +85,28 @@ interface SkeletonParams {
   stack?: Stack;
   testFramework?: string;
   purpose: string;
+  architecture?: Architecture;
+}
+
+/**
+ * Build an import path from one file kind to another, respecting architecture.
+ * For feature-first/modular all files share a directory → `./name.suffix.js`
+ * For layered each kind lives in its own directory → `../targetDir/name.suffix.js`
+ */
+function layeredImport(camelName: string, targetSuffix: string, architecture?: Architecture): string {
+  if (architecture === 'layered') {
+    const dir = LAYERED_DIRS[targetSuffix] ?? targetSuffix;
+    return `../${dir}/${camelName}.${targetSuffix}.js`;
+  }
+  return `./${camelName}.${targetSuffix}.js`;
 }
 
 const SKELETON_GENERATORS: Record<FileKind, (p: SkeletonParams) => string> = {
-  controller: ({ pascalName, camelName, isTS, stack }) => {
+  controller: ({ pascalName, camelName, isTS, stack, architecture }) => {
     if (stack === 'nestjs') {
       return [
         `import { Controller, Get, Post, Put, Delete, Param, Body } from '@nestjs/common';`,
-        `import { ${pascalName}Service } from './${camelName}.service${isTS ? '' : '.js'}';`,
+        `import { ${pascalName}Service } from '${layeredImport(camelName, 'service', architecture)}';`,
         '',
         `@Controller('${camelName}s')`,
         `export class ${pascalName}Controller {`,
@@ -125,13 +141,92 @@ const SKELETON_GENERATORS: Record<FileKind, (p: SkeletonParams) => string> = {
       ].join('\n');
     }
 
-    // Express / Fastify / Hono
-    const expressImport = isTS && (stack === 'express' || stack === 'fastify' || !stack)
-      ? `import type { Request, Response } from 'express';\n`
-      : '';
+    if (stack === 'fastify') {
+      return [
+        ...(isTS ? [`import type { FastifyRequest, FastifyReply } from 'fastify';`] : []),
+        `import { ${pascalName}Service } from '${layeredImport(camelName, 'service', architecture)}';`,
+        '',
+        `const ${camelName}Service = new ${pascalName}Service();`,
+        '',
+        `export class ${pascalName}Controller {`,
+        `  async findAll(req${isTS ? ': FastifyRequest' : ''}, res${isTS ? ': FastifyReply' : ''}) {`,
+        `    const items = await ${camelName}Service.findAll();`,
+        '    return res.send(items);',
+        '  }',
+        '',
+        `  async findOne(req${isTS ? ': FastifyRequest' : ''}, res${isTS ? ': FastifyReply' : ''}) {`,
+        `    const item = await ${camelName}Service.findOne((req.params as any).id);`,
+        '    if (!item) {',
+        '      return res.status(404).send({ error: "Not found" });',
+        '    }',
+        '    return res.send(item);',
+        '  }',
+        '',
+        `  async create(req${isTS ? ': FastifyRequest' : ''}, res${isTS ? ': FastifyReply' : ''}) {`,
+        `    const item = await ${camelName}Service.create(req.body as any);`,
+        '    return res.status(201).send(item);',
+        '  }',
+        '',
+        `  async update(req${isTS ? ': FastifyRequest' : ''}, res${isTS ? ': FastifyReply' : ''}) {`,
+        `    const item = await ${camelName}Service.update((req.params as any).id, req.body as any);`,
+        '    return res.send(item);',
+        '  }',
+        '',
+        `  async remove(req${isTS ? ': FastifyRequest' : ''}, res${isTS ? ': FastifyReply' : ''}) {`,
+        `    await ${camelName}Service.remove((req.params as any).id);`,
+        '    return res.status(204).send();',
+        '  }',
+        '}',
+        '',
+      ].join('\n');
+    }
+
+    if (stack === 'hono') {
+      const honoId = isTS ? "c.req.param('id')!" : "c.req.param('id')";
+      return [
+        ...(isTS ? [`import type { Context } from 'hono';`] : []),
+        `import { ${pascalName}Service } from '${layeredImport(camelName, 'service', architecture)}';`,
+        '',
+        `const ${camelName}Service = new ${pascalName}Service();`,
+        '',
+        `export class ${pascalName}Controller {`,
+        `  async findAll(c${isTS ? ': Context' : ''}) {`,
+        `    const items = await ${camelName}Service.findAll();`,
+        '    return c.json(items);',
+        '  }',
+        '',
+        `  async findOne(c${isTS ? ': Context' : ''}) {`,
+        `    const item = await ${camelName}Service.findOne(${honoId});`,
+        '    if (!item) {',
+        `      return c.json({ error: "Not found" }, 404);`,
+        '    }',
+        '    return c.json(item);',
+        '  }',
+        '',
+        `  async create(c${isTS ? ': Context' : ''}) {`,
+        `    const item = await ${camelName}Service.create(await c.req.json());`,
+        '    return c.json(item, 201);',
+        '  }',
+        '',
+        `  async update(c${isTS ? ': Context' : ''}) {`,
+        `    const item = await ${camelName}Service.update(${honoId}, await c.req.json());`,
+        '    return c.json(item);',
+        '  }',
+        '',
+        `  async remove(c${isTS ? ': Context' : ''}) {`,
+        `    await ${camelName}Service.remove(${honoId});`,
+        '    return c.body(null, 204);',
+        '  }',
+        '}',
+        '',
+      ].join('\n');
+    }
+
+    // Express (default)
+    const idAccess = isTS ? 'req.params.id as string' : 'req.params.id';
     return [
-      ...(expressImport ? [expressImport.trimEnd()] : []),
-      `import { ${pascalName}Service } from './${camelName}.service.js';`,
+      ...(isTS ? [`import type { Request, Response } from 'express';`] : []),
+      `import { ${pascalName}Service } from '${layeredImport(camelName, 'service', architecture)}';`,
       '',
       `const ${camelName}Service = new ${pascalName}Service();`,
       '',
@@ -142,7 +237,7 @@ const SKELETON_GENERATORS: Record<FileKind, (p: SkeletonParams) => string> = {
       '  }',
       '',
       `  async findOne(req${isTS ? ': Request' : ''}, res${isTS ? ': Response' : ''}) {`,
-      `    const item = await ${camelName}Service.findOne(req.params.id);`,
+      `    const item = await ${camelName}Service.findOne(${idAccess});`,
       '    if (!item) {',
       '      res.status(404).json({ error: "Not found" });',
       '      return;',
@@ -156,12 +251,12 @@ const SKELETON_GENERATORS: Record<FileKind, (p: SkeletonParams) => string> = {
       '  }',
       '',
       `  async update(req${isTS ? ': Request' : ''}, res${isTS ? ': Response' : ''}) {`,
-      `    const item = await ${camelName}Service.update(req.params.id, req.body);`,
+      `    const item = await ${camelName}Service.update(${idAccess}, req.body);`,
       '    res.json(item);',
       '  }',
       '',
       `  async remove(req${isTS ? ': Request' : ''}, res${isTS ? ': Response' : ''}) {`,
-      `    await ${camelName}Service.remove(req.params.id);`,
+      `    await ${camelName}Service.remove(${idAccess});`,
       '    res.status(204).send();',
       '  }',
       '}',
@@ -169,8 +264,9 @@ const SKELETON_GENERATORS: Record<FileKind, (p: SkeletonParams) => string> = {
     ].join('\n');
   },
 
-  service: ({ pascalName, camelName, isTS }) => [
-    `import { ${pascalName}Repository } from './${camelName}.repository.js';`,
+  service: ({ pascalName, camelName, isTS, architecture }) => [
+    ...(isTS ? [`import type { ${pascalName} } from '${layeredImport(camelName, 'model', architecture)}';`] : []),
+    `import { ${pascalName}Repository } from '${layeredImport(camelName, 'repository', architecture)}';`,
     '',
     `const ${camelName}Repository = new ${pascalName}Repository();`,
     '',
@@ -198,7 +294,8 @@ const SKELETON_GENERATORS: Record<FileKind, (p: SkeletonParams) => string> = {
     '',
   ].join('\n'),
 
-  repository: ({ pascalName, isTS }) => [
+  repository: ({ pascalName, camelName, isTS, architecture }) => [
+    ...(isTS ? [`import type { ${pascalName} } from '${layeredImport(camelName, 'model', architecture)}';`, ''] : []),
     `export class ${pascalName}Repository {`,
     `  async findAll()${isTS ? `: Promise<${pascalName}[]>` : ''} {`,
     '    // TODO: implement database query',
@@ -258,11 +355,11 @@ const SKELETON_GENERATORS: Record<FileKind, (p: SkeletonParams) => string> = {
     ].join('\n');
   },
 
-  routes: ({ pascalName, camelName, isTS, stack }) => {
+  routes: ({ pascalName, camelName, isTS, stack, architecture }) => {
     if (stack === 'fastify') {
       return [
         `import type { FastifyInstance } from 'fastify';`,
-        `import { ${pascalName}Controller } from './${camelName}.controller.js';`,
+        `import { ${pascalName}Controller } from '${layeredImport(camelName, 'controller', architecture)}';`,
         '',
         `const controller = new ${pascalName}Controller();`,
         '',
@@ -279,7 +376,7 @@ const SKELETON_GENERATORS: Record<FileKind, (p: SkeletonParams) => string> = {
     if (stack === 'hono') {
       return [
         `import { Hono } from 'hono';`,
-        `import { ${pascalName}Controller } from './${camelName}.controller.js';`,
+        `import { ${pascalName}Controller } from '${layeredImport(camelName, 'controller', architecture)}';`,
         '',
         `const controller = new ${pascalName}Controller();`,
         `export const ${camelName}Routes = new Hono();`,
@@ -295,7 +392,7 @@ const SKELETON_GENERATORS: Record<FileKind, (p: SkeletonParams) => string> = {
     // Express (default)
     return [
       `import { Router } from 'express';`,
-      `import { ${pascalName}Controller } from './${camelName}.controller.js';`,
+      `import { ${pascalName}Controller } from '${layeredImport(camelName, 'controller', architecture)}';`,
       '',
       `const router = Router();`,
       `const controller = new ${pascalName}Controller();`,
@@ -359,11 +456,11 @@ const SKELETON_GENERATORS: Record<FileKind, (p: SkeletonParams) => string> = {
     '',
   ].join('\n'),
 
-  test: ({ pascalName, camelName, isTS, testFramework }) => {
+  test: ({ pascalName, camelName, isTS, testFramework, architecture }) => {
     const importSource = testFramework === 'jest' ? '@jest/globals' : 'vitest';
     return [
       `import { describe, it, expect, beforeEach } from '${importSource}';`,
-      `import { ${pascalName}Service } from './${camelName}.service.js';`,
+      `import { ${pascalName}Service } from '${layeredImport(camelName, 'service', architecture)}';`,
       '',
       `describe('${pascalName}Service', () => {`,
       `  let service${isTS ? `: ${pascalName}Service` : ''};`,
@@ -409,17 +506,39 @@ const SKELETON_GENERATORS: Record<FileKind, (p: SkeletonParams) => string> = {
   ].join('\n'),
 
   middleware: ({ pascalName, isTS, stack }) => {
-    const importLine = isTS && (stack === 'express' || stack === 'fastify' || !stack)
-      ? `import type { Request, Response, NextFunction } from 'express';\n\n`
-      : '';
+    const funcName = pascalName.charAt(0).toLowerCase() + pascalName.slice(1);
+
+    if (stack === 'fastify') {
+      return [
+        ...(isTS ? [`import type { FastifyRequest, FastifyReply, HookHandlerDoneFunction } from 'fastify';`, ''] : []),
+        `export function ${funcName}Middleware(req${isTS ? ': FastifyRequest' : ''}, res${isTS ? ': FastifyReply' : ''}, done${isTS ? ': HookHandlerDoneFunction' : ''}) {`,
+        '  // TODO: implement middleware logic',
+        '  done();',
+        '}',
+        '',
+      ].join('\n');
+    }
+
+    if (stack === 'hono') {
+      return [
+        ...(isTS ? [`import type { Context, Next } from 'hono';`, ''] : []),
+        `export async function ${funcName}Middleware(c${isTS ? ': Context' : ''}, next${isTS ? ': Next' : ''}) {`,
+        '  // TODO: implement middleware logic',
+        '  await next();',
+        '}',
+        '',
+      ].join('\n');
+    }
+
+    // Express (default)
     return [
-      importLine.trimEnd(),
-      `export function ${pascalName.charAt(0).toLowerCase() + pascalName.slice(1)}Middleware(req${isTS ? ': Request' : ''}, res${isTS ? ': Response' : ''}, next${isTS ? ': NextFunction' : ''}) {`,
+      ...(isTS ? [`import type { Request, Response, NextFunction } from 'express';`, ''] : []),
+      `export function ${funcName}Middleware(req${isTS ? ': Request' : ''}, res${isTS ? ': Response' : ''}, next${isTS ? ': NextFunction' : ''}) {`,
       '  // TODO: implement middleware logic',
       '  next();',
       '}',
       '',
-    ].filter(Boolean).join('\n');
+    ].join('\n');
   },
 
   util: ({ }) => [

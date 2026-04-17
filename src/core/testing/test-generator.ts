@@ -84,7 +84,7 @@ async function generateTestForFile(
   const purpose = findPurposeInMap(map?.structure ?? {}, filePath);
 
   const framework = config.generation.testFramework;
-  const importPath = `./${baseName}${ext === '.ts' ? '' : ext}`;
+  const importPath = `./${baseName}${ext === '.ts' || ext === '.tsx' ? '.js' : ext}`;
 
   const content = generateTestContent({
     framework,

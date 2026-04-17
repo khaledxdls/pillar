@@ -1,7 +1,7 @@
 import type { PillarConfig } from '../config/index.js';
 import type { GeneratedFile, GeneratorContext, ResourceField } from './types.js';
 import { generateSkeleton } from './skeleton.js';
-import { resolveResourcePath } from '../../utils/resolve-resource-path.js';
+import { resolveResourcePath, LAYERED_DIRS } from '../../utils/resolve-resource-path.js';
 import { escapeRegex } from '../../utils/sanitize.js';
 
 interface ResourceOptions {
@@ -27,17 +27,6 @@ const RESOURCE_FILES: ResourceFileSpec[] = [
   { suffix: 'types', purpose: (n: string) => `TypeScript interfaces and types for ${n}`, kind: 'types' },
   { suffix: 'test', purpose: (n: string) => `Unit and integration tests for ${n}`, kind: 'test' },
 ];
-
-const LAYERED_DIRS: Record<string, string> = {
-  model: 'models',
-  repository: 'repositories',
-  service: 'services',
-  controller: 'controllers',
-  routes: 'routes',
-  validator: 'validators',
-  types: 'types',
-  test: 'tests',
-};
 
 export class ResourceGenerator {
   private readonly context: GeneratorContext;

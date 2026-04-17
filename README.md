@@ -89,7 +89,7 @@ pillar create src/utils/cache.ts -p "in-memory cache wrapper" --dry-run
 
 Short alias: `pillar c`
 
-The skeleton generator is context-aware — a file named `*.controller.ts` gets a controller scaffold, `*.service.ts` gets a service scaffold, `*.middleware.ts` gets a middleware scaffold with proper Express type imports, etc.
+The skeleton generator is context-aware — a file named `*.controller.ts` gets a controller scaffold, `*.service.ts` gets a service scaffold, `*.middleware.ts` gets a middleware scaffold with proper stack-specific type imports (Express, Fastify, Hono, or NestJS), etc.
 
 Options:
 
@@ -109,25 +109,36 @@ Generate a complete resource with all associated files, wire routes into the app
 pillar add resource user --fields "name:string email:string age:number isActive:boolean"
 ```
 
-Generates (for feature-first Express):
+Generates (example for feature-first Express):
 
 ```
 src/features/user/
   user.model.ts        # Data model + CreateInput + UpdateInput (with fields)
-  user.repository.ts   # Database queries and data access
-  user.service.ts      # Business logic
-  user.controller.ts   # HTTP request handlers (with Express type imports)
+  user.repository.ts   # Database queries and data access (imports model type)
+  user.service.ts      # Business logic (imports model type)
+  user.controller.ts   # HTTP request handlers (stack-specific types)
   user.routes.ts       # Route definitions (GET, POST, PUT, DELETE)
   user.validator.ts    # Zod validation schemas (with field rules)
   user.types.ts        # TypeScript interfaces
   user.test.ts         # Unit and integration test stubs
 ```
 
-Also auto-updates `src/app.ts` with:
+For layered architecture, files are placed in their respective directories (`src/models/`, `src/services/`, `src/controllers/`, etc.) with correct cross-directory imports.
+
+Auto-updates `src/app.ts` with stack-correct wiring:
 
 ```ts
+// Express
 import { userRouter } from './features/user/user.routes.js';
 app.use('/users', userRouter);
+
+// Fastify
+import { userRoutes } from './features/user/user.routes.js';
+app.register(userRoutes);
+
+// Hono
+import { userRoutes } from './features/user/user.routes.js';
+app.route('/users', userRoutes);
 ```
 
 Options:
@@ -200,8 +211,8 @@ What it does:
 
 - Adds the relation field to the source model (e.g., `posts?: Post[]`)
 - Adds the inverse field to the target model (e.g., `user?: User`)
-- Adds `import type` statements for the related types
-- Adds a finder method to the source repository
+- Adds `import type` statements with correct relative paths (works across layered directories)
+- Adds a finder method to the source repository (with proper return type imports)
 
 Options:
 
@@ -213,7 +224,7 @@ Options:
 
 ### `pillar add middleware <name>`
 
-Generate a middleware file with proper Express type imports.
+Generate a middleware file with stack-aware type imports (Express `NextFunction`, Fastify `HookHandlerDoneFunction`, Hono `Next`).
 
 ```bash
 pillar add middleware auth
@@ -563,7 +574,7 @@ pillar rename post article
 
 What it renames:
 
-- Resource directory (`src/features/post/` -> `src/features/article/`)
+- Resource directory or individual files (supports all architecture patterns including layered)
 - All contained files (`post.controller.ts` -> `article.controller.ts`)
 - PascalCase identifiers (`PostController` -> `ArticleController`, `PostService` -> `ArticleService`)
 - camelCase identifiers (`postService` -> `articleService`, `postRouter` -> `articleRouter`)
@@ -647,8 +658,8 @@ The map is stored in `.pillar/map.json` and auto-updates whenever you use Pillar
 | Stack | Category | Smart Skeletons |
 |---|---|---|
 | **Express** | API | Controllers with `Request`/`Response` types, `Router`-based routes, middleware with `NextFunction` |
-| **Fastify** | API | Routes with Fastify plugin pattern, `FastifyInstance` typing |
-| **Hono** | API | Hono router pattern, `Context`-based handlers |
+| **Fastify** | API | Routes with `FastifyInstance` plugin pattern, `FastifyRequest`/`FastifyReply` typing, scoped route registration |
+| **Hono** | API | `Hono` router, `Context`-based handlers with `c.json()`/`c.req.param()` |
 | **NestJS** | API | Decorators (`@Controller`, `@Get`, `@Post`), modules, dependency injection |
 | **Next.js** | Fullstack | App router, layouts, pages, components |
 
@@ -659,8 +670,10 @@ The map is stored in `.pillar/map.json` and auto-updates whenever you use Pillar
 | Pattern | Structure | Best for |
 |---------|-----------|----------|
 | **Feature-first** | `src/features/<name>/` — each feature is self-contained | Most projects, scales well |
-| **Layered** | `src/controllers/`, `src/services/`, `src/repositories/` | Simple CRUD APIs |
+| **Layered** | `src/controllers/`, `src/services/`, `src/models/`, `src/repositories/` — files grouped by type | Simple CRUD APIs |
 | **Modular** | `src/modules/<name>/` — domain modules | Large apps, DDD |
+
+All commands (`add resource`, `add field`, `add endpoint`, `add relation`, `rename`, `seed`, `test generate`) work correctly across all three architecture patterns. Cross-directory imports are resolved automatically.
 
 ---
 

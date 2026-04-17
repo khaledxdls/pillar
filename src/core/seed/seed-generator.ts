@@ -3,7 +3,8 @@ import fs from 'fs-extra';
 import type { PillarConfig } from '../config/index.js';
 import type { MapNode } from '../map/types.js';
 import { MapManager } from '../map/index.js';
-import { resolveResourcePath } from '../../utils/resolve-resource-path.js';
+import { resolveResourceFilePath } from '../../utils/resolve-resource-path.js';
+import type { Architecture } from '../../utils/constants.js';
 import { escapeRegex } from '../../utils/sanitize.js';
 
 interface SeedField {
@@ -30,12 +31,12 @@ export async function generateSeedFile(
 ): Promise<GeneratedSeed> {
   const ext = config.project.language === 'typescript' ? 'ts' : 'js';
   const isTS = config.project.language === 'typescript';
-  const basePath = resolveResourcePath(config.project.architecture, resourceName);
+  const arch = config.project.architecture;
   const seedDir = 'src/seeds';
   const seedPath = `${seedDir}/${resourceName}.seed.${ext}`;
 
   // Try to read fields from existing types/model
-  const fields = await extractFields(projectRoot, basePath, resourceName, ext);
+  const fields = await extractFields(projectRoot, arch, resourceName, ext);
 
   const pascalName = resourceName.charAt(0).toUpperCase() + resourceName.slice(1);
 
@@ -46,7 +47,6 @@ export async function generateSeedFile(
     count,
     isTS,
     ext,
-    basePath,
   });
 
   return {
@@ -107,7 +107,6 @@ interface SeedContentOptions {
   count: number;
   isTS: boolean;
   ext: string;
-  basePath: string;
 }
 
 function generateSeedContent(opts: SeedContentOptions): string {
@@ -187,12 +186,12 @@ function generateSeedContent(opts: SeedContentOptions): string {
 
 async function extractFields(
   projectRoot: string,
-  basePath: string,
+  architecture: Architecture,
   resourceName: string,
   ext: string,
 ): Promise<SeedField[]> {
-  const typesPath = path.join(projectRoot, basePath, `${resourceName}.types.${ext}`);
-  const modelPath = path.join(projectRoot, basePath, `${resourceName}.model.${ext}`);
+  const typesPath = path.join(projectRoot, resolveResourceFilePath(architecture, resourceName, 'types', ext));
+  const modelPath = path.join(projectRoot, resolveResourceFilePath(architecture, resourceName, 'model', ext));
   const targetPath = (await fs.pathExists(typesPath)) ? typesPath :
     (await fs.pathExists(modelPath)) ? modelPath : null;
 

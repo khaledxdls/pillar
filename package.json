@@ -18,7 +18,6 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node dist/bin/pillar.js",
-    "lint": "eslint src/",
     "test": "vitest run",
     "test:watch": "vitest",
     "prepublishOnly": "npm run build"
@@ -30,8 +29,16 @@
     "codegen",
     "developer-tools"
   ],
-  "author": "",
+  "author": "Khaled Bachir Delassi",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/khaledxdls/pillar.git"
+  },
+  "bugs": {
+    "url": "https://github.com/khaledxdls/pillar/issues"
+  },
+  "homepage": "https://github.com/khaledxdls/pillar#readme",
   "engines": {
     "node": ">=18.0.0"
   },

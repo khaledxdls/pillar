@@ -114,6 +114,7 @@ function generateFileFromAction(action: AIFileAction, config: PillarConfig): str
   let content = generateSkeleton(fileName, action.purpose, {
     stack: config.project.stack,
     language: config.project.language,
+    architecture: config.project.architecture,
     testFramework: config.generation.testFramework,
   });
 
@@ -239,17 +240,30 @@ function injectMethods(
   for (const method of methods) {
     if (updated.includes(`${method.name}(`)) continue;
 
-    const reqType = isTS ? 'req: Request' : 'req';
-    const resType = isTS ? 'res: Response' : 'res';
-
     let newMethod: string;
     if (kind === 'controller') {
+      let params: string;
+      let body: string;
+      switch (config.project.stack) {
+        case 'fastify':
+          params = isTS ? 'req: FastifyRequest, res: FastifyReply' : 'req, res';
+          body = 'return res.send({ message: "not implemented" });';
+          break;
+        case 'hono':
+          params = isTS ? 'c: Context' : 'c';
+          body = 'return c.json({ message: "not implemented" });';
+          break;
+        default:
+          params = isTS ? 'req: Request, res: Response' : 'req, res';
+          body = 'res.json({ message: "not implemented" });';
+          break;
+      }
       newMethod = [
         '',
         `  // ${method.description}`,
-        `  async ${method.name}(${reqType}, ${resType}) {`,
+        `  async ${method.name}(${params}) {`,
         `    // TODO: implement`,
-        `    res.json({ message: "not implemented" });`,
+        `    ${body}`,
         `  }`,
       ].join('\n');
     } else {

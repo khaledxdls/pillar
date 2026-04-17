@@ -2,7 +2,7 @@ import path from 'node:path';
 import fs from 'fs-extra';
 import type { PillarConfig } from '../config/index.js';
 import type { FileOperation } from '../history/types.js';
-import { resolveResourcePath } from '../../utils/resolve-resource-path.js';
+import { resolveResourceFilePath } from '../../utils/resolve-resource-path.js';
 import { escapeRegex, assertSafeResourceName } from '../../utils/sanitize.js';
 
 interface FieldDefinition {
@@ -40,13 +40,13 @@ export async function addFieldToResource(
   fieldDefs: FieldDefinition[],
 ): Promise<FieldExtensionResult> {
   const ext = config.project.language === 'typescript' ? 'ts' : 'js';
-  const basePath = resolveResourcePath(config.project.architecture, resourceName);
+  const arch = config.project.architecture;
   const operations: FileOperation[] = [];
   const modifiedFiles: string[] = [];
 
   // Add to model/types
-  const modelFile = path.join(projectRoot, basePath, `${resourceName}.model.${ext}`);
-  const typesFile = path.join(projectRoot, basePath, `${resourceName}.types.${ext}`);
+  const modelFile = path.join(projectRoot, resolveResourceFilePath(arch, resourceName, 'model', ext));
+  const typesFile = path.join(projectRoot, resolveResourceFilePath(arch, resourceName, 'types', ext));
 
   if (config.project.language === 'typescript') {
     // Update types file
@@ -69,7 +69,7 @@ export async function addFieldToResource(
   }
 
   // Update validator (Zod schema)
-  const validatorFile = path.join(projectRoot, basePath, `${resourceName}.validator.${ext}`);
+  const validatorFile = path.join(projectRoot, resolveResourceFilePath(arch, resourceName, 'validator', ext));
   if (await fs.pathExists(validatorFile)) {
     const result = await injectFieldsIntoZodSchema(validatorFile, resourceName, fieldDefs);
     if (result) {

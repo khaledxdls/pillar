@@ -7,7 +7,8 @@ import { HistoryManager, type FileOperation } from '../core/history/index.js';
 import { ResourceGenerator } from '../core/generator/resource-generator.js';
 import { generateSkeleton } from '../core/generator/skeleton.js';
 import type { ResourceField } from '../core/generator/types.js';
-import { logger, findProjectRoot, withSpinner, resolveResourcePath } from '../utils/index.js';
+import { logger, findProjectRoot, withSpinner } from '../utils/index.js';
+import { resolveResourcePath, resolveResourceFilePath } from '../utils/resolve-resource-path.js';
 
 interface AddResourceOptions {
   fields?: string;
@@ -228,10 +229,10 @@ async function wireRouteIntoApp(
 
   const pascalName = resourceName.charAt(0).toUpperCase() + resourceName.slice(1);
   const camelName = resourceName.charAt(0).toLowerCase() + resourceName.slice(1);
-  const basePath = resolveResourcePath(config.project.architecture, resourceName);
 
   // Compute relative import path from src/app.ts to the routes file
-  const routesRelPath = `./${path.relative('src', basePath)}/${resourceName}.routes.js`;
+  const routesFilePath = resolveResourceFilePath(config.project.architecture, resourceName, 'routes', ext);
+  const routesRelPath = `./${path.relative('src', routesFilePath).replace(/\.ts$/, '.js')}`;
 
   let importLine: string;
   let registrationLine: string;

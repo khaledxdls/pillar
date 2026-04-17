@@ -6,7 +6,7 @@ import { MapManager } from '../core/map/index.js';
 import { HistoryManager } from '../core/history/index.js';
 import type { FileOperation } from '../core/history/types.js';
 import { logger, findProjectRoot, withSpinner } from '../utils/index.js';
-import { resolveResourcePath } from '../utils/resolve-resource-path.js';
+import { resolveResourcePath, resolveResourceFilePath, LAYERED_DIRS } from '../utils/resolve-resource-path.js';
 import { escapeRegex } from '../utils/sanitize.js';
 
 interface RenameOptions {
@@ -44,7 +44,14 @@ export async function renameCommand(
   }
 
   const config = await loadConfig(projectRoot);
-  const basePath = resolveResourcePath(config.project.architecture, oldName);
+  const arch = config.project.architecture;
+
+  if (arch === 'layered') {
+    await renameLayered(projectRoot, config, oldName, newName, options);
+    return;
+  }
+
+  const basePath = resolveResourcePath(arch, oldName);
   const oldDir = path.join(projectRoot, basePath);
 
   if (!(await fs.pathExists(oldDir))) {
@@ -53,7 +60,7 @@ export async function renameCommand(
     return;
   }
 
-  const newBasePath = resolveResourcePath(config.project.architecture, newName);
+  const newBasePath = resolveResourcePath(arch, newName);
   const newDir = path.join(projectRoot, newBasePath);
 
   if (await fs.pathExists(newDir)) {
@@ -69,7 +76,6 @@ export async function renameCommand(
     newPath: f.replace(new RegExp(`\\b${escapeRegex(oldName)}\\b`, 'g'), newName),
     oldRelative: path.relative(projectRoot, f),
     newRelative: path.relative(projectRoot, f.replace(new RegExp(`\\b${escapeRegex(oldName)}\\b`, 'g'), newName))
-      // Also update the parent dir
       .replace(basePath, newBasePath),
   }));
 
@@ -134,25 +140,18 @@ export async function renameCommand(
       const content = await fs.readFile(file, 'utf-8');
       const updated = replaceResourceName(content, oldName, newName);
       if (updated !== content) {
-        // Record modify with the OLD path — undo will restore content at the old location
         operations.push({ type: 'modify', path: path.relative(projectRoot, file), previousContent: content });
         await fs.writeFile(file, updated, 'utf-8');
       }
     }
 
     // 3. Move the entire directory, then rename individual files.
-    //    Record each file move so undo can reverse them precisely.
-    //    Order matters: undo replays in reverse, so record dir-level first, file-level second.
-
-    // Snapshot the file list before moving (relative to the old dir)
     const filesBefore = await discoverFiles(oldDir);
     const fileRelPaths = filesBefore.map((f) => path.relative(oldDir, f));
 
-    // Move directory
     await fs.ensureDir(path.dirname(newDir));
     await fs.move(oldDir, newDir);
 
-    // Record the directory move
     operations.push({
       type: 'move',
       path: path.relative(projectRoot, newDir),
@@ -188,6 +187,130 @@ export async function renameCommand(
   }
 
   // Record history
+  const history = new HistoryManager(projectRoot);
+  await history.record(`rename ${oldName} ${newName}`, operations);
+
+  logger.blank();
+  logger.success(`Renamed ${chalk.cyan(oldName)} → ${chalk.cyan(newName)}`);
+  logger.blank();
+}
+
+/**
+ * Rename for layered architecture: files are scattered across subdirectories
+ * (src/models/, src/services/, etc.) so we rename each file individually.
+ */
+async function renameLayered(
+  projectRoot: string,
+  config: import('../core/config/index.js').PillarConfig,
+  oldName: string,
+  newName: string,
+  options: RenameOptions,
+): Promise<void> {
+  const ext = config.project.language === 'typescript' ? 'ts' : 'js';
+
+  // Discover existing resource files across layered subdirectories
+  const filePairs: Array<{ oldPath: string; newPath: string; oldRel: string; newRel: string }> = [];
+  for (const [suffix, dir] of Object.entries(LAYERED_DIRS)) {
+    const oldFile = path.join(projectRoot, 'src', dir, `${oldName}.${suffix}.${ext}`);
+    if (await fs.pathExists(oldFile)) {
+      const newFile = path.join(projectRoot, 'src', dir, `${newName}.${suffix}.${ext}`);
+      filePairs.push({
+        oldPath: oldFile,
+        newPath: newFile,
+        oldRel: path.relative(projectRoot, oldFile),
+        newRel: path.relative(projectRoot, newFile),
+      });
+    }
+  }
+
+  if (filePairs.length === 0) {
+    logger.error(`Resource "${oldName}" not found in any layered directory`);
+    process.exitCode = 1;
+    return;
+  }
+
+  // Check for conflicts
+  for (const pair of filePairs) {
+    if (await fs.pathExists(pair.newPath)) {
+      logger.error(`Target file already exists: ${pair.newRel}`);
+      process.exitCode = 1;
+      return;
+    }
+  }
+
+  const srcDir = path.join(projectRoot, 'src');
+  const importUpdates = await findImportReferences(srcDir, oldName, newName, '');
+
+  logger.banner('Rename Plan');
+  logger.info(`Rename: ${chalk.cyan(oldName)} → ${chalk.cyan(newName)} (layered)`);
+  logger.blank();
+  logger.info(`${filePairs.length} file(s) to rename:`);
+  for (const f of filePairs) {
+    console.log(`  ${chalk.red(f.oldRel)} → ${chalk.green(f.newRel)}`);
+  }
+  logger.blank();
+
+  if (importUpdates.length > 0) {
+    logger.info(`${importUpdates.length} file(s) with import references to update:`);
+    for (const f of importUpdates) {
+      console.log(`  ${chalk.yellow('~')} ${chalk.cyan(path.relative(projectRoot, f.filePath))}`);
+    }
+    logger.blank();
+  }
+
+  if (options.dryRun) {
+    logger.info(chalk.dim('Dry run — no files were changed.'));
+    return;
+  }
+
+  const inquirer = await import('inquirer');
+  const { proceed } = await inquirer.default.prompt<{ proceed: boolean }>([{
+    type: 'confirm',
+    name: 'proceed',
+    message: 'Apply rename?',
+    default: true,
+  }]);
+
+  if (!proceed) {
+    logger.info('Aborted.');
+    return;
+  }
+
+  const operations: FileOperation[] = [];
+
+  await withSpinner(`Renaming ${oldName} → ${newName}`, async () => {
+    // 1. Update import references outside resource files
+    for (const ref of importUpdates) {
+      const content = await fs.readFile(ref.filePath, 'utf-8');
+      const updated = ref.updater(content);
+      if (updated !== content) {
+        operations.push({ type: 'modify', path: path.relative(projectRoot, ref.filePath), previousContent: content });
+        await fs.writeFile(ref.filePath, updated, 'utf-8');
+      }
+    }
+
+    // 2. Update content inside resource files, then rename
+    for (const pair of filePairs) {
+      const content = await fs.readFile(pair.oldPath, 'utf-8');
+      const updated = replaceResourceName(content, oldName, newName);
+      if (updated !== content) {
+        operations.push({ type: 'modify', path: pair.oldRel, previousContent: content });
+        await fs.writeFile(pair.oldPath, updated, 'utf-8');
+      }
+
+      await fs.move(pair.oldPath, pair.newPath);
+      operations.push({ type: 'move', path: pair.newRel, fromPath: pair.oldRel });
+    }
+  });
+
+  // Refresh map
+  if (config.map.autoUpdate) {
+    await withSpinner('Refreshing project map', async () => {
+      const mapManager = new MapManager(projectRoot);
+      await mapManager.refresh(config);
+    });
+  }
+
   const history = new HistoryManager(projectRoot);
   await history.record(`rename ${oldName} ${newName}`, operations);
 

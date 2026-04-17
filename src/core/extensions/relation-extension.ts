@@ -2,7 +2,7 @@ import path from 'node:path';
 import fs from 'fs-extra';
 import type { PillarConfig } from '../config/index.js';
 import type { FileOperation } from '../history/types.js';
-import { resolveResourcePath } from '../../utils/resolve-resource-path.js';
+import { resolveResourceFilePath } from '../../utils/resolve-resource-path.js';
 import { escapeRegex, assertSafeResourceName } from '../../utils/sanitize.js';
 
 export type RelationType = 'one-to-one' | 'one-to-many' | 'many-to-many';
@@ -33,11 +33,9 @@ export async function addRelationToResource(
 ): Promise<RelationResult> {
   const ext = config.project.language === 'typescript' ? 'ts' : 'js';
   const isTS = config.project.language === 'typescript';
+  const arch = config.project.architecture;
   const operations: FileOperation[] = [];
   const modifiedFiles: string[] = [];
-
-  const sourceBase = resolveResourcePath(config.project.architecture, relation.sourceResource);
-  const targetBase = resolveResourcePath(config.project.architecture, relation.targetResource);
 
   const { sourceField, sourceType, inverseField, inverseType } = deriveFieldNames(relation);
 
@@ -45,17 +43,15 @@ export async function addRelationToResource(
   const sourcePascal = relation.sourceResource.charAt(0).toUpperCase() + relation.sourceResource.slice(1);
 
   // 1. Update source types/model
-  for (const suffix of ['types', 'model']) {
-    const filePath = path.join(projectRoot, sourceBase, `${relation.sourceResource}.${suffix}.${ext}`);
+  for (const suffix of ['types', 'model'] as const) {
+    const filePath = path.join(projectRoot, resolveResourceFilePath(arch, relation.sourceResource, suffix, ext));
     if (!await fs.pathExists(filePath)) continue;
 
-    // Add import for the target type
-    const importPath = path.relative(
-      path.dirname(filePath),
-      path.join(projectRoot, targetBase, `${relation.targetResource}.${suffix}.${ext}`),
-    ).replace(/\\/g, '/').replace(/\.ts$/, '.js');
-    const importLine = `import type { ${targetPascal} } from './${importPath}';`;
-    await injectImportIfMissing(filePath, importLine, targetPascal);
+    const targetFilePath = path.join(projectRoot, resolveResourceFilePath(arch, relation.targetResource, suffix, ext));
+    if (!await fs.pathExists(targetFilePath)) continue;
+
+    const importSpec = buildRelativeImport(filePath, targetFilePath, targetPascal);
+    await injectImportIfMissing(filePath, importSpec.line, targetPascal);
 
     const result = await injectRelationField(filePath, relation.sourceResource, sourceField, sourceType, isTS);
     if (result) {
@@ -65,17 +61,15 @@ export async function addRelationToResource(
   }
 
   // 2. Update target types/model (inverse side)
-  for (const suffix of ['types', 'model']) {
-    const filePath = path.join(projectRoot, targetBase, `${relation.targetResource}.${suffix}.${ext}`);
+  for (const suffix of ['types', 'model'] as const) {
+    const filePath = path.join(projectRoot, resolveResourceFilePath(arch, relation.targetResource, suffix, ext));
     if (!await fs.pathExists(filePath)) continue;
 
-    // Add import for the source type
-    const importPath = path.relative(
-      path.dirname(filePath),
-      path.join(projectRoot, sourceBase, `${relation.sourceResource}.${suffix}.${ext}`),
-    ).replace(/\\/g, '/').replace(/\.ts$/, '.js');
-    const importLine = `import type { ${sourcePascal} } from './${importPath}';`;
-    await injectImportIfMissing(filePath, importLine, sourcePascal);
+    const sourceFilePath = path.join(projectRoot, resolveResourceFilePath(arch, relation.sourceResource, suffix, ext));
+    if (!await fs.pathExists(sourceFilePath)) continue;
+
+    const importSpec = buildRelativeImport(filePath, sourceFilePath, sourcePascal);
+    await injectImportIfMissing(filePath, importSpec.line, sourcePascal);
 
     const result = await injectRelationField(filePath, relation.targetResource, inverseField, inverseType, isTS);
     if (result) {
@@ -84,9 +78,15 @@ export async function addRelationToResource(
     }
   }
 
-  // 3. Add finder method to source repository
-  const repoPath = path.join(projectRoot, sourceBase, `${relation.sourceResource}.repository.${ext}`);
+  // 3. Add finder method to source repository (with target type import)
+  const repoPath = path.join(projectRoot, resolveResourceFilePath(arch, relation.sourceResource, 'repository', ext));
   if (await fs.pathExists(repoPath)) {
+    const targetModelPath = path.join(projectRoot, resolveResourceFilePath(arch, relation.targetResource, 'model', ext));
+    if (await fs.pathExists(targetModelPath)) {
+      const repoImport = buildRelativeImport(repoPath, targetModelPath, targetPascal);
+      await injectImportIfMissing(repoPath, repoImport.line, targetPascal);
+    }
+
     const result = await injectRelationMethod(repoPath, relation, isTS);
     if (result) {
       operations.push(result.operation);
@@ -95,6 +95,25 @@ export async function addRelationToResource(
   }
 
   return { operations, modifiedFiles };
+}
+
+/**
+ * Build a correct relative import line between two absolute file paths.
+ * Handles .ts → .js extension mapping and ensures the path starts with ./ or ../
+ */
+function buildRelativeImport(
+  fromFile: string,
+  toFile: string,
+  typeName: string,
+): { line: string } {
+  let rel = path.relative(path.dirname(fromFile), toFile).replace(/\\/g, '/');
+  // Map .ts/.tsx extensions to .js for ESM compatibility
+  rel = rel.replace(/\.tsx?$/, '.js');
+  // Ensure the path starts with ./ for same-directory imports
+  if (!rel.startsWith('.')) {
+    rel = './' + rel;
+  }
+  return { line: `import type { ${typeName} } from '${rel}';` };
 }
 
 function deriveFieldNames(relation: RelationDefinition): {
