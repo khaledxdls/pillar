@@ -2,7 +2,7 @@ import path from 'node:path';
 import inquirer from 'inquirer';
 import fs from 'fs-extra';
 import chalk from 'chalk';
-import { type PillarConfig, writeConfig, DEFAULT_GENERATION, DEFAULT_MAP, DEFAULT_EXTRAS } from '../core/config/index.js';
+import { type PillarConfig, writeConfig, DEFAULT_GENERATION, DEFAULT_MAP, DEFAULT_EXTRAS, DEFAULT_DOCTOR } from '../core/config/index.js';
 import { MapManager } from '../core/map/index.js';
 import { scaffoldProject } from '../core/generator/project-scaffolder.js';
 import { resolveDependencies, getVersion } from '../core/generator/deps.js';
@@ -328,6 +328,7 @@ function buildConfig(answers: UserAnswers): PillarConfig {
       linting: answers.extras.includes('linting'),
       gitHooks: answers.extras.includes('gitHooks'),
     },
+    doctor: { ...DEFAULT_DOCTOR },
   };
 }
 

@@ -69,6 +69,16 @@ export async function addEndpointCommand(
   if (!projectRoot) return;
 
   const config = await loadConfig(projectRoot);
+
+  if (config.generation.purposeRequired && !options.purpose) {
+    logger.error(
+      'A --purpose is required by this project configuration.',
+      'Re-run with -p "<why this endpoint exists>" or set generation.purposeRequired=false.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+
   const endpoint = parseEndpointDef(endpointStr, resourceName);
   const purpose = options.purpose ?? `${endpoint.method} ${endpoint.path}`;
 

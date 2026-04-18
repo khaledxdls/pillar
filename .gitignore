@@ -11,5 +11,6 @@ pillar-nestjsdev/
 pillar-realdev/
 pillar-featureaudit/
 playground/
-.codex  
+.codex
+test-cli/
 CLAUDE.md

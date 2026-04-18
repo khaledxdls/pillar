@@ -41,6 +41,11 @@ export const pillarConfigSchema = z.object({
     linting: z.boolean().default(false),
     gitHooks: z.boolean().default(false),
   }),
+  doctor: z.object({
+    // Time budget for `tsc --noEmit` in the type-checking diagnostic.
+    // Large monorepos legitimately take longer than 30s; raise when needed.
+    tscTimeoutMs: z.number().int().positive().default(60_000),
+  }).default({ tscTimeoutMs: 60_000 }),
   // List of plugin specifiers — either bare npm package names or relative
   // paths. Optional for backwards compatibility with configs written
   // before the plugin system existed.
@@ -65,4 +70,8 @@ export const DEFAULT_EXTRAS: PillarConfig['extras'] = {
   docker: false,
   linting: false,
   gitHooks: false,
+};
+
+export const DEFAULT_DOCTOR: PillarConfig['doctor'] = {
+  tscTimeoutMs: 60_000,
 };

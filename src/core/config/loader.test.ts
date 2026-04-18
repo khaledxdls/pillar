@@ -19,6 +19,7 @@ const VALID_CONFIG: PillarConfig = {
   generation: { overwrite: false, dryRun: false, testFramework: 'vitest', purposeRequired: true },
   map: { autoUpdate: true, format: ['json', 'markdown'] },
   extras: { docker: false, linting: false, gitHooks: false },
+  doctor: { tscTimeoutMs: 60_000 },
 };
 
 describe('config/loader', () => {

@@ -30,6 +30,15 @@ export async function generateTestsForPath(
   return generateTestForFile(ctx, targetPath);
 }
 
+const IGNORED_DIRS = new Set(['node_modules', 'dist', 'build', '.git', '.pillar', 'coverage']);
+
+/**
+ * Recursively walk a directory, generating test stubs for every eligible
+ * source file. Required so that feature-first layouts (one folder holds
+ * controller + service + repository) and layered layouts (each kind lives
+ * under its own sibling dir) both produce full coverage from a single
+ * `pillar test generate <path>` call.
+ */
 async function generateTestsForDirectory(
   ctx: TestGenContext,
   dirPath: string,
@@ -40,14 +49,22 @@ async function generateTestsForDirectory(
   const results: GeneratedFile[] = [];
 
   for (const entry of entries) {
+    const childRel = path.join(dirPath, entry.name);
+
+    if (entry.isDirectory()) {
+      if (IGNORED_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
+      const nested = await generateTestsForDirectory(ctx, childRel);
+      results.push(...nested);
+      continue;
+    }
+
     if (!entry.isFile()) continue;
 
     const ext = path.extname(entry.name);
     if (!['.ts', '.tsx', '.js', '.jsx'].includes(ext)) continue;
     if (entry.name.includes('.test.') || entry.name.includes('.spec.')) continue;
 
-    const filePath = path.join(dirPath, entry.name);
-    const tests = await generateTestForFile(ctx, filePath);
+    const tests = await generateTestForFile(ctx, childRel);
     results.push(...tests);
   }
 

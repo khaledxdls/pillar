@@ -105,13 +105,35 @@ export class HistoryManager {
     await fs.writeJson(this.historyPath, history, { spaces: 2 });
   }
 
+  /**
+   * Walk upwards from `dir`, removing directories that are empty as a result of
+   * the undo. Stops at the project root and never touches the project root
+   * itself, dot-directories (e.g. `.pillar`, `.git`), or paths outside the
+   * project root.
+   *
+   * Originally only walked inside `src/`, which left orphaned empty folders
+   * under `docs/`, `tests/`, `scripts/`, etc. after undoing generators that
+   * write outside `src/`.
+   */
   private async removeEmptyParents(dir: string): Promise<void> {
-    const srcDir = path.join(this.projectRoot, 'src');
-    let current = dir;
+    const root = path.resolve(this.projectRoot);
+    let current = path.resolve(dir);
 
-    while (current.startsWith(srcDir) && current !== srcDir) {
-      const contents = await fs.readdir(current);
+    while (
+      current !== root &&
+      current.startsWith(root + path.sep) &&
+      !path.basename(current).startsWith('.')
+    ) {
+      let contents: string[];
+      try {
+        contents = await fs.readdir(current);
+      } catch {
+        // Directory was already removed (or never existed) — nothing to do.
+        break;
+      }
+
       if (contents.length > 0) break;
+
       await fs.remove(current);
       current = path.dirname(current);
     }

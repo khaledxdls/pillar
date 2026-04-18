@@ -174,6 +174,16 @@ export async function addMiddlewareCommand(name: string, options: AddMiddlewareO
   }
 
   const config = await loadConfig(projectRoot);
+
+  if (config.generation.purposeRequired && !options.purpose) {
+    logger.error(
+      'A --purpose is required by this project configuration.',
+      'Re-run with -p "<why this middleware exists>" or set generation.purposeRequired=false.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+
   const middlewareName = name.toLowerCase();
   const ext = config.project.language === 'typescript' ? 'ts' : 'js';
 

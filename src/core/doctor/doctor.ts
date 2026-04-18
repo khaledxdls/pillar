@@ -2,9 +2,10 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import fs from 'fs-extra';
 import type { PillarConfig } from '../config/index.js';
+import { loadConfig } from '../config/index.js';
 import { MapManager } from '../map/index.js';
 import { CONFIG_FILE } from '../../utils/constants.js';
-import { pillarConfigSchema } from '../config/schema.js';
+import { pillarConfigSchema, DEFAULT_DOCTOR } from '../config/schema.js';
 
 export interface DiagnosticCheck {
   name: string;
@@ -25,8 +26,20 @@ export interface FixResult {
   message: string;
 }
 
-export async function runDiagnostics(projectRoot: string): Promise<DiagnosticReport> {
+export interface RunDiagnosticsOptions {
+  /** Override the tsc timeout (ms). Falls back to config, then DEFAULT_DOCTOR.tscTimeoutMs. */
+  tscTimeoutMs?: number;
+}
+
+export async function runDiagnostics(
+  projectRoot: string,
+  options: RunDiagnosticsOptions = {},
+): Promise<DiagnosticReport> {
   const checks: DiagnosticCheck[] = [];
+
+  const tscTimeoutMs =
+    options.tscTimeoutMs ??
+    (await resolveTscTimeout(projectRoot));
 
   checks.push(await checkConfig(projectRoot));
   checks.push(await checkDependencies(projectRoot));
@@ -36,11 +49,20 @@ export async function runDiagnostics(projectRoot: string): Promise<DiagnosticRep
   checks.push(await checkGitIgnore(projectRoot));
   checks.push(await checkTsConfig(projectRoot));
   checks.push(await checkCircularDependencies(projectRoot));
-  checks.push(await checkTypeScript(projectRoot));
+  checks.push(await checkTypeScript(projectRoot, tscTimeoutMs));
 
   const score = calculateScore(checks);
 
   return { checks, score };
+}
+
+async function resolveTscTimeout(projectRoot: string): Promise<number> {
+  try {
+    const config = await loadConfig(projectRoot);
+    return config.doctor?.tscTimeoutMs ?? DEFAULT_DOCTOR.tscTimeoutMs;
+  } catch {
+    return DEFAULT_DOCTOR.tscTimeoutMs;
+  }
 }
 
 async function checkConfig(projectRoot: string): Promise<DiagnosticCheck> {
@@ -401,7 +423,7 @@ function detectCycles(graph: Map<string, string[]>): string[][] {
  * Run tsc --noEmit to catch type errors in the project.
  * Only runs if a tsconfig.json exists and TypeScript is installed.
  */
-async function checkTypeScript(projectRoot: string): Promise<DiagnosticCheck> {
+async function checkTypeScript(projectRoot: string, timeoutMs: number): Promise<DiagnosticCheck> {
   const tsconfigPath = path.join(projectRoot, 'tsconfig.json');
   if (!(await fs.pathExists(tsconfigPath))) {
     return { name: 'Type checking', status: 'pass', message: 'No tsconfig.json — skipping type check' };
@@ -416,13 +438,28 @@ async function checkTypeScript(projectRoot: string): Promise<DiagnosticCheck> {
   try {
     execFileSync(tscPath, ['--noEmit', '--pretty', 'false'], {
       cwd: projectRoot,
-      timeout: 30000,
+      timeout: timeoutMs,
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     return { name: 'Type checking', status: 'pass', message: 'No TypeScript errors' };
   } catch (err: unknown) {
-    const output = (err as { stdout?: string }).stdout ?? '';
+    const e = err as { stdout?: string; signal?: string; code?: string };
+
+    // Distinguish a timeout from real type errors so users know whether to
+    // raise `doctor.tscTimeoutMs` or go fix their code.
+    if (e.signal === 'SIGTERM' || e.code === 'ETIMEDOUT') {
+      return {
+        name: 'Type checking',
+        status: 'warn',
+        message: `Type check timed out after ${timeoutMs} ms`,
+        details: [
+          `Increase "doctor.tscTimeoutMs" in pillar.config.json for larger projects.`,
+        ],
+      };
+    }
+
+    const output = e.stdout ?? '';
     const errorLines = output
       .split('\n')
       .filter((l) => l.includes('error TS'))
