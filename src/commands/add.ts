@@ -270,6 +270,10 @@ async function wireRouteIntoApp(
 
   const camelName = toCamelCase(resourceName);
   const pluralPath = pluralizeResource(camelName);
+  // `resourceName` originates from a CLI argument, so `camelName` must be
+  // escaped before it is spliced into a RegExp constructor. Without this,
+  // a crafted name could alter the pattern (CodeQL js/regex-injection).
+  const camelNameRe = escapeRegExp(camelName);
 
   const routesFilePath = resolveResourceFilePath(config.project.architecture, resourceName, 'routes', ext);
   const routesRelPath = `./${path.relative('src', routesFilePath).replace(/\.ts$/, '.js')}`;
@@ -282,17 +286,17 @@ async function wireRouteIntoApp(
     case 'fastify':
       importLine = `import { ${camelName}Routes } from '${routesRelPath}';`;
       registrationLine = `  app.register(${camelName}Routes);`;
-      registrationPattern = new RegExp(`app\\.register\\(\\s*${camelName}Routes\\s*\\)`);
+      registrationPattern = new RegExp(`app\\.register\\(\\s*${camelNameRe}Routes\\s*\\)`);
       break;
     case 'hono':
       importLine = `import { ${camelName}Routes } from '${routesRelPath}';`;
       registrationLine = `app.route('/${pluralPath}', ${camelName}Routes);`;
-      registrationPattern = new RegExp(`app\\.route\\([^)]*${camelName}Routes`);
+      registrationPattern = new RegExp(`app\\.route\\([^)]*${camelNameRe}Routes`);
       break;
     default:
       importLine = `import { ${camelName}Router } from '${routesRelPath}';`;
       registrationLine = `app.use('/${pluralPath}', ${camelName}Router);`;
-      registrationPattern = new RegExp(`app\\.use\\([^)]*${camelName}Router`);
+      registrationPattern = new RegExp(`app\\.use\\([^)]*${camelNameRe}Router`);
       break;
   }
 
@@ -444,6 +448,14 @@ async function wireIntoNestAppModule(
   };
 }
 
+
+/**
+ * Escape RegExp metacharacters so a user-controlled string can be used
+ * safely inside `new RegExp(...)`.
+ */
+function escapeRegExp(input: string): string {
+  return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 /**
  * Parse field string like "name:string email:string age:number"
