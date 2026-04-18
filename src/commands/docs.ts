@@ -1,5 +1,7 @@
 import path from 'node:path';
 import http from 'node:http';
+import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import fs from 'fs-extra';
 import chalk from 'chalk';
 import { loadConfig } from '../core/config/index.js';
@@ -83,17 +85,14 @@ export async function docsServeCommand(options: DocsServeOptions): Promise<void>
   }
 
   const specJson = JSON.stringify(spec);
-
-  const html = buildSwaggerHtml(specJson);
+  const assetsDir = resolveSwaggerAssetsDir();
+  const html = buildSwaggerHtml();
 
   const server = http.createServer((req, res) => {
-    if (req.url === '/openapi.json') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(specJson);
-      return;
-    }
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(html);
+    void handleDocsRequest(req, res, { specJson, html, assetsDir }).catch((err) => {
+      res.writeHead(500, { 'Content-Type': 'text/plain' });
+      res.end(`Internal error: ${(err as Error).message}`);
+    });
   });
 
   server.listen(port, () => {
@@ -114,17 +113,101 @@ export async function docsServeCommand(options: DocsServeOptions): Promise<void>
 }
 
 /**
- * Build a self-contained Swagger UI HTML page.
- * Uses the official Swagger UI CDN — no local dependencies needed.
+ * Serve Swagger UI assets from the installed `swagger-ui-dist` package so
+ * `pillar docs serve` works offline and in air-gapped environments. Routes:
+ *   - `/`                 → HTML shell
+ *   - `/openapi.json`     → the generated spec
+ *   - `/assets/<file>`    → static assets from `swagger-ui-dist`
+ *
+ * The assets directory is resolved once per serve call and the file reads
+ * are scoped to it, so arbitrary path traversal is not possible.
  */
-function buildSwaggerHtml(specJson: string): string {
+interface DocsRouteContext {
+  specJson: string;
+  html: string;
+  assetsDir: string;
+}
+
+const ASSET_CONTENT_TYPES: Record<string, string> = {
+  '.js': 'application/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.map': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+};
+
+async function handleDocsRequest(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  ctx: DocsRouteContext,
+): Promise<void> {
+  const url = req.url ?? '/';
+
+  if (url === '/openapi.json') {
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(ctx.specJson);
+    return;
+  }
+
+  if (url.startsWith('/assets/')) {
+    const assetName = path.posix.normalize(url.slice('/assets/'.length));
+    // Reject any path that escapes the assets dir.
+    if (assetName.startsWith('..') || assetName.includes('\0') || path.isAbsolute(assetName)) {
+      res.writeHead(400, { 'Content-Type': 'text/plain' });
+      res.end('Bad request');
+      return;
+    }
+    const filePath = path.join(ctx.assetsDir, assetName);
+    const resolved = path.resolve(filePath);
+    if (!resolved.startsWith(path.resolve(ctx.assetsDir) + path.sep)) {
+      res.writeHead(400, { 'Content-Type': 'text/plain' });
+      res.end('Bad request');
+      return;
+    }
+    if (!(await fs.pathExists(resolved))) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('Not found');
+      return;
+    }
+    const contentType = ASSET_CONTENT_TYPES[path.extname(resolved).toLowerCase()]
+      ?? 'application/octet-stream';
+    const data = await fs.readFile(resolved);
+    res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'public, max-age=3600' });
+    res.end(data);
+    return;
+  }
+
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(ctx.html);
+}
+
+/**
+ * Resolve the on-disk path of `swagger-ui-dist` using Node's resolver. This
+ * works whether Pillar is installed globally, locally, or via npx — the
+ * resolver walks up from this file's location, not from the user's CWD.
+ */
+function resolveSwaggerAssetsDir(): string {
+  const require = createRequire(fileURLToPath(import.meta.url));
+  // `swagger-ui-dist/package.json` is guaranteed to exist; `dirname` gives
+  // us the package root, which is also the assets directory.
+  const pkgJson = require.resolve('swagger-ui-dist/package.json');
+  return path.dirname(pkgJson);
+}
+
+/**
+ * Build the Swagger UI HTML shell. Loads CSS and JS from our own
+ * `/assets/` route — no external network calls.
+ */
+function buildSwaggerHtml(): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Pillar API Documentation</title>
-  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+  <link rel="stylesheet" href="/assets/swagger-ui.css">
   <style>
     body { margin: 0; padding: 0; }
     #swagger-ui { max-width: 1200px; margin: 0 auto; }
@@ -132,14 +215,15 @@ function buildSwaggerHtml(specJson: string): string {
 </head>
 <body>
   <div id="swagger-ui"></div>
-  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script src="/assets/swagger-ui-bundle.js"></script>
+  <script src="/assets/swagger-ui-standalone-preset.js"></script>
   <script>
     SwaggerUIBundle({
-      spec: ${specJson},
+      url: '/openapi.json',
       dom_id: '#swagger-ui',
       deepLinking: true,
-      presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
-      layout: "BaseLayout"
+      presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
+      layout: 'BaseLayout'
     });
   </script>
 </body>

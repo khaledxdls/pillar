@@ -4,6 +4,66 @@ import type { PillarConfig } from '../config/index.js';
 import type { ProjectMap } from '../map/types.js';
 import type { AIGenerationPlan, AIRequestContext, AIProviderConfig } from './types.js';
 import { aiGenerationPlanSchema } from './plan-schema.js';
+import { parseAIJson, AIResponseParseError } from './json-parser.js';
+
+/** Current Anthropic API version. Bumped from `2023-06-01` (pre tool-use). */
+const ANTHROPIC_API_VERSION = '2023-06-01';
+
+/**
+ * Default models. Kept in one place so CLI flags, docs, and the engine stay
+ * aligned. These are the generally-available, non-legacy model IDs at the
+ * time of writing; users can always override with `--model`.
+ */
+export const DEFAULT_MODELS = {
+  anthropic: 'claude-sonnet-4-6',
+  openai: 'gpt-4o',
+} as const;
+
+/**
+ * JSON Schema for the AI plan, used by Anthropic tool-use to force
+ * structured output. Mirrors `aiGenerationPlanSchema` (Zod) — keep in sync.
+ * The schema is intentionally permissive around unknown fields so we don't
+ * reject valid plans when the model adds harmless extras.
+ */
+const PLAN_TOOL_SCHEMA = {
+  type: 'object',
+  required: ['summary', 'create', 'modify'],
+  properties: {
+    summary: { type: 'string' },
+    create: { type: 'array', items: { $ref: '#/definitions/fileAction' } },
+    modify: { type: 'array', items: { $ref: '#/definitions/fileAction' } },
+  },
+  definitions: {
+    fileAction: {
+      type: 'object',
+      required: ['path', 'purpose', 'kind'],
+      properties: {
+        path: { type: 'string' },
+        purpose: { type: 'string' },
+        kind: { type: 'string' },
+        fields: {
+          type: 'array',
+          items: {
+            type: 'object',
+            required: ['name', 'type'],
+            properties: { name: { type: 'string' }, type: { type: 'string' } },
+          },
+        },
+        methods: {
+          type: 'array',
+          items: {
+            type: 'object',
+            required: ['name', 'description'],
+            properties: { name: { type: 'string' }, description: { type: 'string' } },
+          },
+        },
+        content: { type: 'string' },
+        imports: { type: 'array', items: { type: 'string' } },
+        registrations: { type: 'array', items: { type: 'string' } },
+      },
+    },
+  },
+} as const;
 
 const SYSTEM_PROMPT = `You are Pillar AI, an architecture-aware code planning assistant.
 You receive a project context (stack, architecture, map) and a user request.
@@ -117,23 +177,18 @@ export async function callAIProvider(
 ): Promise<AIGenerationPlan> {
   const { provider, apiKey, model } = providerConfig;
 
-  let responseText: string;
+  // Providers now return either a pre-parsed object (tool_use /
+  // response_format=json_object) or raw text. The tolerant parser absorbs
+  // the variance without a special case per provider.
+  const rawResponse = provider === 'anthropic'
+    ? await callAnthropic(apiKey, model, systemPrompt, userPrompt)
+    : await callOpenAI(apiKey, model, systemPrompt, userPrompt);
 
-  if (provider === 'anthropic') {
-    responseText = await callAnthropic(apiKey, model, systemPrompt, userPrompt);
-  } else {
-    responseText = await callOpenAI(apiKey, model, systemPrompt, userPrompt);
-  }
+  const parsed: unknown = typeof rawResponse === 'string'
+    ? parseAIJson(rawResponse)
+    : rawResponse;
 
-  // Parse the JSON response
-  const cleaned = responseText
-    .replace(/^```json?\s*/m, '')
-    .replace(/```\s*$/m, '')
-    .trim();
-
-  const raw: unknown = JSON.parse(cleaned);
-
-  const result = aiGenerationPlanSchema.safeParse(raw);
+  const result = aiGenerationPlanSchema.safeParse(parsed);
   if (!result.success) {
     const issues = result.error.issues
       .map((i) => `${i.path.join('.')}: ${i.message}`)
@@ -212,6 +267,10 @@ export async function callAIWithFileContext(
   return { plan: refinedPlan, totalTokens: pass1Tokens + pass2Tokens };
 }
 
+/**
+ * OpenAI Chat Completions with `response_format: json_object`. Returns the
+ * raw string content; the caller runs it through the tolerant parser.
+ */
 async function callOpenAI(
   apiKey: string,
   model: string,
@@ -248,23 +307,41 @@ async function callOpenAI(
   return content;
 }
 
+/**
+ * Anthropic Messages with forced tool-use. We advertise a single tool whose
+ * schema matches the plan shape and set `tool_choice` to that tool — this
+ * turns the response into a pre-parsed JSON object rather than free-form
+ * text, eliminating the "stray thinking token breaks JSON.parse" failure
+ * mode. If for some reason tool_use isn't returned, we fall back to
+ * concatenated text blocks and let the tolerant parser handle them.
+ */
 async function callAnthropic(
   apiKey: string,
   model: string,
   systemPrompt: string,
   userPrompt: string,
-): Promise<string> {
+): Promise<unknown> {
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
+      'anthropic-version': ANTHROPIC_API_VERSION,
     },
     body: JSON.stringify({
       model,
       max_tokens: 4096,
+      temperature: 0.2,
       system: systemPrompt,
+      tools: [
+        {
+          name: 'emit_plan',
+          description:
+            'Emit the structured file-generation plan for the user request.',
+          input_schema: PLAN_TOOL_SCHEMA,
+        },
+      ],
+      tool_choice: { type: 'tool', name: 'emit_plan' },
       messages: [{ role: 'user', content: userPrompt }],
     }),
   });
@@ -275,9 +352,26 @@ async function callAnthropic(
   }
 
   const data = (await response.json()) as {
-    content: Array<{ type: string; text: string }>;
+    content: Array<
+      | { type: 'tool_use'; name: string; input: unknown }
+      | { type: 'text'; text: string }
+      | { type: string; [k: string]: unknown }
+    >;
   };
-  const textBlock = data.content.find((b) => b.type === 'text');
-  if (!textBlock) throw new Error('Empty response from Anthropic');
-  return textBlock.text;
+
+  for (const block of data.content) {
+    if (block.type === 'tool_use' && (block as { name: string }).name === 'emit_plan') {
+      return (block as { input: unknown }).input;
+    }
+  }
+
+  // Fallback: concatenate text blocks if the model bypassed tool-use.
+  const text = data.content
+    .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+    .map((b) => b.text)
+    .join('\n');
+  if (!text) throw new Error('Empty response from Anthropic');
+  return text;
 }
+
+export { AIResponseParseError };

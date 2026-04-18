@@ -5,11 +5,13 @@ import { loadConfig, type PillarConfig } from '../core/config/index.js';
 import { MapManager } from '../core/map/index.js';
 import { HistoryManager, type FileOperation } from '../core/history/index.js';
 import { ResourceGenerator } from '../core/generator/resource-generator.js';
+import { PluginRegistry, PluginLoadError } from '../core/plugins/index.js';
 import { generateSkeleton } from '../core/generator/skeleton.js';
 import type { ResourceField } from '../core/generator/types.js';
 import { logger, findProjectRoot, withSpinner } from '../utils/index.js';
 import { resolveResourcePath, resolveResourceFilePath } from '../utils/resolve-resource-path.js';
 import { toPascalCase, toCamelCase, pluralizeResource } from '../utils/naming.js';
+import { addElementToDecoratorArray, ensureNamedImport } from '../core/ast/index.js';
 
 interface AddResourceOptions {
   fields?: string;
@@ -40,12 +42,38 @@ export async function addResourceCommand(name: string, options: AddResourceOptio
   const only = options.only ? options.only.split(',').map((s) => s.trim()) : undefined;
 
   const generator = new ResourceGenerator(config);
-  const files = generator.generate({
+  let files = generator.generate({
     name: resourceName,
     fields,
     skipTest: options.noTest,
     only,
   });
+
+  // Plugins may contribute additional files and transform existing ones
+  // before anything touches the filesystem. Registry load errors are
+  // warnings, never fatal — a broken plugin must not block core codegen.
+  const registry = PluginRegistry.fromConfig(projectRoot, config);
+  try {
+    await registry.load();
+  } catch (err) {
+    if (err instanceof PluginLoadError) {
+      logger.info(`Plugin warning: ${err.message}`);
+    } else {
+      throw err;
+    }
+  }
+
+  const pluginExtras = await registry.runOnResourceGenerated({
+    resourceName,
+    generatedFiles: files,
+  });
+  files = [...files, ...pluginExtras];
+
+  const transformed: typeof files = [];
+  for (const f of files) {
+    transformed.push(await registry.runTransformGeneratedFile(f));
+  }
+  files = transformed;
 
   if (options.dryRun) {
     logger.banner('Dry Run — Resource Generation');
@@ -385,15 +413,18 @@ async function wireIntoNestAppModule(
   const controllerFile = toImportPath(path.relative(moduleDir, controllerAbs));
   const serviceFile = toImportPath(path.relative(moduleDir, serviceAbs));
 
-  const controllerImport = `import { ${controllerClass} } from '${controllerFile}';`;
-  const serviceImport = `import { ${serviceClass} } from '${serviceFile}';`;
-
+  // AST path keeps the AppModule formatted correctly (Prettier-friendly)
+  // and handles the "property doesn't exist yet" case cleanly. We only use
+  // text-splice fallbacks for imports to preserve behaviour when ts-morph
+  // can't parse the file (e.g., mid-edit).
   let updated = content;
-  if (!updated.includes(controllerClass)) updated = insertImport(updated, controllerImport);
-  if (!updated.includes(serviceClass)) updated = insertImport(updated, serviceImport);
+  updated = ensureNamedImport(updated, controllerFile, controllerClass);
+  updated = ensureNamedImport(updated, serviceFile, serviceClass);
 
-  updated = extendModuleArray(updated, 'controllers', controllerClass);
-  updated = extendModuleArray(updated, 'providers', serviceClass);
+  const withControllers = addElementToDecoratorArray(updated, 'Module', 'controllers', controllerClass);
+  if (withControllers !== null) updated = withControllers;
+  const withProviders = addElementToDecoratorArray(updated, 'Module', 'providers', serviceClass);
+  if (withProviders !== null) updated = withProviders;
 
   if (updated === previousContent) return null;
 
@@ -403,32 +434,6 @@ async function wireIntoNestAppModule(
   };
 }
 
-/**
- * Add `entry` to the `key: [ ... ]` array inside a `@Module({ ... })`
- * decorator. If the array doesn't exist, create it. Idempotent.
- */
-function extendModuleArray(content: string, key: string, entry: string): string {
-  // Already present?
-  const presentRe = new RegExp(`${key}\\s*:\\s*\\[[^\\]]*\\b${entry}\\b[^\\]]*\\]`);
-  if (presentRe.test(content)) return content;
-
-  const arrayRe = new RegExp(`(${key}\\s*:\\s*\\[)([\\s\\S]*?)(\\])`);
-  const match = arrayRe.exec(content);
-  if (match) {
-    const existing = match[2]!.trim();
-    const replacement = existing.length === 0
-      ? `${match[1]}${entry}${match[3]}`
-      : `${match[1]}${match[2]!.replace(/\s*$/, '')}${existing.endsWith(',') ? '' : ','} ${entry}${match[3]}`;
-    return content.replace(arrayRe, replacement);
-  }
-
-  // No existing array — inject into the @Module({...}) object.
-  const moduleRe = /@Module\s*\(\s*\{/;
-  const mm = moduleRe.exec(content);
-  if (!mm) return content;
-  const insertAt = mm.index + mm[0].length;
-  return content.slice(0, insertAt) + `\n  ${key}: [${entry}],` + content.slice(insertAt);
-}
 
 /**
  * Parse field string like "name:string email:string age:number"

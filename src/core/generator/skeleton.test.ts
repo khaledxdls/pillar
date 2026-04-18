@@ -116,6 +116,29 @@ describe('generateSkeleton', () => {
     expect(result).toContain('FastifyInstance');
   });
 
+  it('generates typed Fastify controller without as-any casts', () => {
+    const result = generateSkeleton('user.controller.ts', 'Controller', {
+      stack: 'fastify',
+      language: 'typescript',
+    });
+    // Route-generic types replace the `as any` escape hatches.
+    expect(result).not.toContain('as any');
+    expect(result).toContain('FastifyRequest<{ Params: { id: string } }>');
+    expect(result).toContain('FastifyRequest<{ Body: CreateUserInput }>');
+    expect(result).toContain('FastifyRequest<{ Params: { id: string }; Body: UpdateUserInput }>');
+    expect(result).toContain('req.params.id');
+    expect(result).toContain('req.body');
+  });
+
+  it('pluralizes irregular resource names in route paths', () => {
+    const result = generateSkeleton('person.routes.ts', 'Routes', {
+      stack: 'fastify',
+      language: 'typescript',
+    });
+    expect(result).toContain("'/people'");
+    expect(result).not.toContain("'/persons'");
+  });
+
   it('generates Hono routes with context parameter', () => {
     const result = generateSkeleton('user.routes.ts', 'Routes', {
       stack: 'hono',

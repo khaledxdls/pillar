@@ -129,38 +129,56 @@ const SKELETON_GENERATORS: Record<FileKind, (p: SkeletonParams) => string> = {
     }
 
     if (stack === 'fastify') {
+      // TS Fastify uses route-generic types (`FastifyRequest<{ Params, Body }>`)
+      // so handlers get typed `req.params.id` / `req.body` without `as any`.
+      const idParams = `{ Params: { id: string } }`;
+      const bodyOnly = `{ Body: Create${pascalName}Input }`;
+      const idAndBody = `{ Params: { id: string }; Body: Update${pascalName}Input }`;
+      const reqFindOne = isTS ? `req: FastifyRequest<${idParams}>` : 'req';
+      const reqCreate = isTS ? `req: FastifyRequest<${bodyOnly}>` : 'req';
+      const reqUpdate = isTS ? `req: FastifyRequest<${idAndBody}>` : 'req';
+      const reqRemove = isTS ? `req: FastifyRequest<${idParams}>` : 'req';
+      const reply = isTS ? 'res: FastifyReply' : 'res';
+
+      const typeImports = isTS
+        ? [
+            `import type { FastifyRequest, FastifyReply } from 'fastify';`,
+            `import type { Create${pascalName}Input, Update${pascalName}Input } from '${layeredImport(camelName, 'types', architecture)}';`,
+          ]
+        : [];
+
       return [
-        ...(isTS ? [`import type { FastifyRequest, FastifyReply } from 'fastify';`] : []),
+        ...typeImports,
         `import { ${pascalName}Service } from '${layeredImport(camelName, 'service', architecture)}';`,
         '',
         `const ${camelName}Service = new ${pascalName}Service();`,
         '',
         `export class ${pascalName}Controller {`,
-        `  async findAll(req${isTS ? ': FastifyRequest' : ''}, res${isTS ? ': FastifyReply' : ''}) {`,
+        `  async findAll(req${isTS ? ': FastifyRequest' : ''}, ${reply}) {`,
         `    const items = await ${camelName}Service.findAll();`,
         '    return res.send(items);',
         '  }',
         '',
-        `  async findOne(req${isTS ? ': FastifyRequest' : ''}, res${isTS ? ': FastifyReply' : ''}) {`,
-        `    const item = await ${camelName}Service.findOne((req.params as any).id);`,
+        `  async findOne(${reqFindOne}, ${reply}) {`,
+        `    const item = await ${camelName}Service.findOne(req.params.id);`,
         '    if (!item) {',
         '      return res.status(404).send({ error: "Not found" });',
         '    }',
         '    return res.send(item);',
         '  }',
         '',
-        `  async create(req${isTS ? ': FastifyRequest' : ''}, res${isTS ? ': FastifyReply' : ''}) {`,
-        `    const item = await ${camelName}Service.create(req.body as any);`,
+        `  async create(${reqCreate}, ${reply}) {`,
+        `    const item = await ${camelName}Service.create(req.body);`,
         '    return res.status(201).send(item);',
         '  }',
         '',
-        `  async update(req${isTS ? ': FastifyRequest' : ''}, res${isTS ? ': FastifyReply' : ''}) {`,
-        `    const item = await ${camelName}Service.update((req.params as any).id, req.body as any);`,
+        `  async update(${reqUpdate}, ${reply}) {`,
+        `    const item = await ${camelName}Service.update(req.params.id, req.body);`,
         '    return res.send(item);',
         '  }',
         '',
-        `  async remove(req${isTS ? ': FastifyRequest' : ''}, res${isTS ? ': FastifyReply' : ''}) {`,
-        `    await ${camelName}Service.remove((req.params as any).id);`,
+        `  async remove(${reqRemove}, ${reply}) {`,
+        `    await ${camelName}Service.remove(req.params.id);`,
         '    return res.status(204).send();',
         '  }',
         '}',

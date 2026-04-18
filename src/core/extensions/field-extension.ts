@@ -5,6 +5,7 @@ import type { FileOperation } from '../history/types.js';
 import { resolveResourceFilePath } from '../../utils/resolve-resource-path.js';
 import { assertSafeResourceName } from '../../utils/sanitize.js';
 import { toPascalCase, findInterfaceBlock } from '../../utils/naming.js';
+import { addFieldsToInterface, addFieldsToZodObjectSchema } from '../ast/index.js';
 
 interface FieldDefinition {
   name: string;
@@ -92,23 +93,33 @@ async function injectFieldsIntoInterface(
 
   assertSafeResourceName(resourceName);
   const pascalName = toPascalCase(resourceName);
-  const block = findInterfaceBlock(content, pascalName);
-  if (!block) return null;
 
-  const newFields = fields
-    .map((f) => {
-      const opt = f.optional ? '?' : '';
-      return `  ${f.name}${opt}: ${mapToTSType(f.type)};`;
-    })
-    .join('\n');
+  // Primary path: AST-based. Falls back to the balanced-brace text splice
+  // if ts-morph can't locate the interface (malformed source, partial
+  // files mid-edit, etc.) so we never drop user input.
+  const astResult = addFieldsToInterface(
+    content,
+    pascalName,
+    fields.map((f) => ({ name: f.name, type: mapToTSType(f.type), optional: f.optional })),
+  );
 
-  const body = block.body.replace(/\s+$/, '');
-  const separator = body.length === 0 ? '' : '\n';
-  const updated =
-    content.slice(0, block.openBrace + 1) +
-    body +
-    `${separator}\n${newFields}\n` +
-    content.slice(block.closeBrace);
+  let updated: string;
+  if (astResult !== null) {
+    updated = astResult;
+  } else {
+    const block = findInterfaceBlock(content, pascalName);
+    if (!block) return null;
+    const fieldLines = fields
+      .map((f) => `  ${f.name}${f.optional ? '?' : ''}: ${mapToTSType(f.type)};`)
+      .join('\n');
+    const body = block.body.replace(/\s+$/, '');
+    const separator = body.length === 0 ? '' : '\n';
+    updated =
+      content.slice(0, block.openBrace + 1) +
+      body +
+      `${separator}\n${fieldLines}\n` +
+      content.slice(block.closeBrace);
+  }
 
   if (updated === content) return null;
 
@@ -132,28 +143,40 @@ async function injectFieldsIntoZodSchema(
 
   assertSafeResourceName(resourceName);
   const pascalName = toPascalCase(resourceName);
+  const schemaVar = `create${pascalName}Schema`;
 
-  const header = new RegExp(
-    `export\\s+const\\s+create${pascalName.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}Schema\\s*=\\s*z\\.object\\(\\s*\\{`,
+  const astResult = addFieldsToZodObjectSchema(
+    content,
+    schemaVar,
+    fields.map((f) => ({ name: f.name, expression: mapToZodType(f.type, f.optional) })),
   );
-  const headerMatch = header.exec(content);
-  if (!headerMatch) return null;
 
-  const openBrace = headerMatch.index + headerMatch[0].length - 1;
-  const closeBrace = findBalancedClose(content, openBrace);
-  if (closeBrace === -1) return null;
+  let updated: string;
+  if (astResult !== null) {
+    updated = astResult;
+  } else {
+    // Regex fallback — only used when ts-morph cannot parse the source.
+    const header = new RegExp(
+      `export\\s+const\\s+${escapeForRe(schemaVar)}\\s*=\\s*z\\.object\\(\\s*\\{`,
+    );
+    const headerMatch = header.exec(content);
+    if (!headerMatch) return null;
 
-  const body = content.slice(openBrace + 1, closeBrace).replace(/\s+$/, '');
-  const newFields = fields
-    .map((f) => `  ${f.name}: ${mapToZodType(f.type, f.optional)},`)
-    .join('\n');
+    const openBrace = headerMatch.index + headerMatch[0].length - 1;
+    const closeBrace = findBalancedClose(content, openBrace);
+    if (closeBrace === -1) return null;
 
-  const separator = body.length === 0 ? '' : '\n';
-  const updated =
-    content.slice(0, openBrace + 1) +
-    body +
-    `${separator}\n${newFields}\n` +
-    content.slice(closeBrace);
+    const body = content.slice(openBrace + 1, closeBrace).replace(/\s+$/, '');
+    const newFields = fields
+      .map((f) => `  ${f.name}: ${mapToZodType(f.type, f.optional)},`)
+      .join('\n');
+    const separator = body.length === 0 ? '' : '\n';
+    updated =
+      content.slice(0, openBrace + 1) +
+      body +
+      `${separator}\n${newFields}\n` +
+      content.slice(closeBrace);
+  }
 
   if (updated === content) return null;
 
@@ -165,6 +188,10 @@ async function injectFieldsIntoZodSchema(
       previousContent,
     },
   };
+}
+
+function escapeForRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /**

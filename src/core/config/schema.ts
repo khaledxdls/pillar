@@ -41,6 +41,10 @@ export const pillarConfigSchema = z.object({
     linting: z.boolean().default(false),
     gitHooks: z.boolean().default(false),
   }),
+  // List of plugin specifiers — either bare npm package names or relative
+  // paths. Optional for backwards compatibility with configs written
+  // before the plugin system existed.
+  plugins: z.array(z.string().min(1)).optional(),
 });
 
 export type PillarConfig = z.infer<typeof pillarConfigSchema>;
