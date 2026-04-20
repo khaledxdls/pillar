@@ -20,7 +20,7 @@
  * Biome) later without ripping through every call site.
  */
 
-import { Project, ScriptKind, SyntaxKind, type SourceFile } from 'ts-morph';
+import { Project, ScriptKind, SyntaxKind, type Block, type Node, type SourceFile } from 'ts-morph';
 
 export interface InterfaceFieldSpec {
   name: string;
@@ -220,6 +220,95 @@ export function addElementToDecoratorArray(
     arr.addElement(elementExpression);
     return sf.getFullText();
   });
+}
+
+/**
+ * Append a statement to the body of a function or variable-declared arrow.
+ *
+ * Matches either `function <name>(...)` or `const <name> = (…) => {…}` /
+ * `const <name> = async function …`. Idempotent: if any existing statement
+ * in the body has the same trimmed text as `statementCode`, the file is
+ * returned unchanged.
+ *
+ * Returns `null` when no matching function-like binding exists or its body
+ * is not a block (e.g., a concise arrow `() => expr`). Callers should treat
+ * null as "target not found" — never write a broken partial edit.
+ */
+export function appendStatementToFunction(
+  source: string,
+  functionName: string,
+  statementCode: string,
+): string | null {
+  return withSourceFile(source, (sf) => {
+    const block = findFunctionBlock(sf, functionName);
+    if (!block) return null;
+    if (hasStatementText(block.getStatements(), statementCode)) return sf.getFullText();
+    block.addStatements(statementCode);
+    return sf.getFullText();
+  });
+}
+
+/**
+ * Insert a statement at module scope.
+ *
+ * When `beforeLastExport` is true, inserts immediately before the last
+ * `export { … }` / `export default …` declaration — this is the shape
+ * Express route files take (`router.<verb>(...); … export { router as foo };`)
+ * where appending after the export would place the statement past the
+ * module's public surface.
+ *
+ * Otherwise appends at the end. Idempotent on verbatim trimmed statement
+ * text so re-running `pillar add endpoint` never produces duplicates.
+ */
+export function addModuleStatement(
+  source: string,
+  statementCode: string,
+  opts: { beforeLastExport?: boolean } = {},
+): string {
+  const result = withSourceFile(source, (sf) => {
+    const statements = sf.getStatements();
+    if (hasStatementText(statements, statementCode)) return sf.getFullText();
+
+    if (opts.beforeLastExport) {
+      for (let i = statements.length - 1; i >= 0; i--) {
+        const kind = statements[i]!.getKind();
+        if (kind === SyntaxKind.ExportDeclaration || kind === SyntaxKind.ExportAssignment) {
+          sf.insertStatements(i, statementCode);
+          return sf.getFullText();
+        }
+      }
+    }
+    sf.addStatements(statementCode);
+    return sf.getFullText();
+  });
+  return result ?? source;
+}
+
+function findFunctionBlock(sf: SourceFile, name: string): Block | null {
+  // `fn` path: `function name(…) { … }` (also matches `export async function …`)
+  const fn = sf.getFunction(name);
+  const fnBody = fn?.getBody();
+  if (fnBody && fnBody.getKind() === SyntaxKind.Block) {
+    return fnBody.asKindOrThrow(SyntaxKind.Block);
+  }
+
+  // `const name = async (…) => { … }` / `const name = function (…) { … }`
+  const decl = sf.getVariableDeclaration(name);
+  const init = decl?.getInitializer();
+  if (init) {
+    const arrow = init.asKind(SyntaxKind.ArrowFunction);
+    const fexpr = init.asKind(SyntaxKind.FunctionExpression);
+    const body = (arrow ?? fexpr)?.getBody();
+    if (body && body.getKind() === SyntaxKind.Block) {
+      return body.asKindOrThrow(SyntaxKind.Block);
+    }
+  }
+  return null;
+}
+
+function hasStatementText(statements: readonly Node[], code: string): boolean {
+  const normalized = code.trim();
+  return statements.some((s) => s.getText().trim() === normalized);
 }
 
 /**

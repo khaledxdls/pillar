@@ -5,6 +5,8 @@ import {
   ensureNamedImport,
   addMethodToClass,
   addElementToDecoratorArray,
+  appendStatementToFunction,
+  addModuleStatement,
 } from './index.js';
 
 describe('addFieldsToInterface', () => {
@@ -107,5 +109,67 @@ describe('addElementToDecoratorArray', () => {
     const src = `import { Module } from '@nestjs/common';\n@Module({ controllers: [Foo] })\nexport class AppModule {}\n`;
     const out = addElementToDecoratorArray(src, 'Module', 'controllers', 'Foo')!;
     expect(out.match(/Foo/g)!.length).toBe(1); // stays in array, not duplicated
+  });
+});
+
+describe('appendStatementToFunction', () => {
+  it('appends a statement to an exported async function body', () => {
+    const src = `export async function userRoutes(app) {\n  app.get('/users', h);\n}\n`;
+    const out = appendStatementToFunction(src, 'userRoutes', `app.post('/users', h);`);
+    expect(out).not.toBeNull();
+    expect(out!).toMatch(/app\.get\('\/users', h\);/);
+    expect(out!).toMatch(/app\.post\('\/users', h\);/);
+  });
+
+  it('works for arrow-function variable bindings', () => {
+    const src = `const boot = async (app) => {\n  app.listen(3000);\n};\n`;
+    const out = appendStatementToFunction(src, 'boot', `app.ready();`);
+    expect(out).not.toBeNull();
+    expect(out!).toMatch(/app\.ready\(\);/);
+  });
+
+  it('is idempotent on verbatim statement text', () => {
+    const src = `export async function routes(app) {\n  app.get('/x', h);\n}\n`;
+    const out = appendStatementToFunction(src, 'routes', `app.get('/x', h);`)!;
+    expect(out.match(/app\.get\('\/x', h\);/g)!.length).toBe(1);
+  });
+
+  it('returns null when the function is not present', () => {
+    expect(appendStatementToFunction(`const x = 1;`, 'missing', `x;`)).toBeNull();
+  });
+
+  it('returns null for concise-body arrows (no block)', () => {
+    const src = `const f = (x) => x + 1;\n`;
+    expect(appendStatementToFunction(src, 'f', `x;`)).toBeNull();
+  });
+});
+
+describe('addModuleStatement', () => {
+  it('appends at module scope by default', () => {
+    const src = `const a = 1;\n`;
+    const out = addModuleStatement(src, `const b = 2;`);
+    expect(out).toMatch(/const a = 1;/);
+    expect(out).toMatch(/const b = 2;/);
+  });
+
+  it('inserts before the last export declaration when beforeLastExport is set', () => {
+    const src = `const router = {};\nexport { router as userRouter };\n`;
+    const out = addModuleStatement(src, `router.get('/x', h);`, { beforeLastExport: true });
+    const routerIdx = out.indexOf(`router.get('/x', h);`);
+    const exportIdx = out.indexOf(`export { router`);
+    expect(routerIdx).toBeGreaterThan(-1);
+    expect(routerIdx).toBeLessThan(exportIdx);
+  });
+
+  it('is idempotent on verbatim statement text', () => {
+    const src = `router.get('/a', h);\nexport { router };\n`;
+    const out = addModuleStatement(src, `router.get('/a', h);`, { beforeLastExport: true });
+    expect(out.match(/router\.get\('\/a', h\);/g)!.length).toBe(1);
+  });
+
+  it('falls back to append when beforeLastExport is set but no export exists', () => {
+    const src = `const a = 1;\n`;
+    const out = addModuleStatement(src, `const b = 2;`, { beforeLastExport: true });
+    expect(out).toMatch(/const b = 2;/);
   });
 });
