@@ -8,18 +8,49 @@ import { scaffoldProject } from '../core/generator/project-scaffolder.js';
 import { resolveDependencies, getVersion } from '../core/generator/deps.js';
 import { HistoryManager } from '../core/history/index.js';
 import { logger, withSpinner, SUPPORTED_STACKS } from '../utils/index.js';
+import {
+  SUPPORTED_CATEGORIES,
+  SUPPORTED_LANGUAGES,
+  SUPPORTED_DATABASES,
+  SUPPORTED_ORMS,
+  SUPPORTED_ARCHITECTURES,
+  SUPPORTED_PACKAGE_MANAGERS,
+  SUPPORTED_TEST_FRAMEWORKS,
+} from '../utils/constants.js';
 import type { FileOperation } from '../core/history/types.js';
 import type { Category, Stack } from '../utils/constants.js';
+import { PillarError } from '../utils/errors.js';
 
 interface InitOptions {
   yes?: boolean;
+  stack?: string;
+  category?: string;
+  language?: string;
+  database?: string;
+  orm?: string;
+  architecture?: string;
+  packageManager?: string;
+  testFramework?: string;
+  extras?: string;
+  skipInstall?: boolean;
+  skipGit?: boolean;
 }
+
+const allStacks = ['express', 'fastify', 'nestjs', 'hono', 'nextjs'] as const;
 
 export async function initCommand(projectName: string | undefined, options: InitOptions): Promise<void> {
   logger.banner('Pillar — Project Initialization');
 
-  const answers = options.yes
-    ? getDefaultAnswers(projectName ?? 'my-app')
+  // Non-interactive mode is triggered by -y OR by passing any flag override.
+  const hasOverrides = Boolean(
+    options.stack ?? options.category ?? options.language ?? options.database ??
+      options.orm ?? options.architecture ?? options.packageManager ??
+      options.testFramework ?? options.extras,
+  );
+  const nonInteractive = Boolean(options.yes) || hasOverrides;
+
+  const answers = nonInteractive
+    ? applyOverrides(getDefaultAnswers(projectName ?? 'my-app'), options)
     : await promptUser(projectName);
   const projectDir = path.resolve(answers.projectName);
 
@@ -97,28 +128,33 @@ export async function initCommand(projectName: string | undefined, options: Init
     await fs.writeFile(path.join(projectDir, '.gitignore'), gitignore);
   });
 
-  // 7. Install dependencies
+  // 7. Install dependencies (skippable for CI / E2E harnesses that assemble
+  //    node_modules differently to avoid per-stack install cost).
   const pm = config.project.packageManager;
   const installCmd = pm === 'yarn' ? 'yarn' : `${pm} install`;
 
-  await withSpinner(`Installing dependencies (${pm})`, async (spinner) => {
-    const { execSync } = await import('node:child_process');
-    try {
-      execSync(installCmd, { cwd: projectDir, stdio: 'pipe', timeout: 120_000 });
-    } catch (error) {
-      spinner.warn(`Dependency installation failed — run "${installCmd}" manually`);
-    }
-  });
+  if (!options.skipInstall) {
+    await withSpinner(`Installing dependencies (${pm})`, async (spinner) => {
+      const { execSync } = await import('node:child_process');
+      try {
+        execSync(installCmd, { cwd: projectDir, stdio: 'pipe', timeout: 300_000 });
+      } catch (error) {
+        spinner.warn(`Dependency installation failed — run "${installCmd}" manually`);
+      }
+    });
+  }
 
   // 8. Init git
-  await withSpinner('Initializing git repository', async (spinner) => {
-    const { execSync } = await import('node:child_process');
-    try {
-      execSync('git init', { cwd: projectDir, stdio: 'pipe' });
-    } catch {
-      spinner.warn('Git initialization failed — install git or run "git init" manually');
-    }
-  });
+  if (!options.skipGit) {
+    await withSpinner('Initializing git repository', async (spinner) => {
+      const { execSync } = await import('node:child_process');
+      try {
+        execSync('git init', { cwd: projectDir, stdio: 'pipe' });
+      } catch {
+        spinner.warn('Git initialization failed — install git or run "git init" manually');
+      }
+    });
+  }
 
   // 9. Record history
   const historyManager = new HistoryManager(projectDir);
@@ -151,6 +187,84 @@ interface UserAnswers {
   packageManager: string;
   extras: string[];
   testFramework: string;
+}
+
+/**
+ * Apply CLI flag overrides onto the default answer set. Every value is
+ * validated against the supported-values lists so that a typo fails fast with
+ * a helpful message rather than producing a bad `pillar.config.json` that
+ * zod then rejects further down the pipeline.
+ */
+function applyOverrides(base: UserAnswers, options: InitOptions): UserAnswers {
+  const out: UserAnswers = { ...base };
+
+  if (options.category !== undefined) {
+    assertOneOf('--category', options.category, SUPPORTED_CATEGORIES);
+    out.category = options.category as Category;
+  }
+  if (options.stack !== undefined) {
+    assertOneOf('--stack', options.stack, allStacks);
+    out.stack = options.stack as Stack;
+    // Keep category aligned with the stack so downstream scaffolding picks
+    // the right templates for fullstack vs api.
+    if (options.category === undefined) {
+      out.category = (SUPPORTED_STACKS.fullstack as readonly string[]).includes(options.stack)
+        ? 'fullstack'
+        : 'api';
+    }
+  }
+  if (options.language !== undefined) {
+    assertOneOf('--language', options.language, SUPPORTED_LANGUAGES);
+    out.language = options.language;
+  }
+  if (options.database !== undefined) {
+    assertOneOf('--database', options.database, SUPPORTED_DATABASES);
+    out.database = options.database;
+  }
+  if (options.orm !== undefined) {
+    assertOneOf('--orm', options.orm, SUPPORTED_ORMS);
+    out.orm = options.orm;
+  }
+  if (options.architecture !== undefined) {
+    assertOneOf('--architecture', options.architecture, SUPPORTED_ARCHITECTURES);
+    out.architecture = options.architecture;
+  }
+  if (options.packageManager !== undefined) {
+    assertOneOf('--package-manager', options.packageManager, SUPPORTED_PACKAGE_MANAGERS);
+    out.packageManager = options.packageManager;
+  }
+  if (options.testFramework !== undefined) {
+    assertOneOf('--test-framework', options.testFramework, SUPPORTED_TEST_FRAMEWORKS);
+    out.testFramework = options.testFramework;
+  }
+  if (options.extras !== undefined) {
+    const allowed = new Set(['docker', 'linting', 'gitHooks']);
+    out.extras = options.extras
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    for (const e of out.extras) {
+      if (!allowed.has(e)) {
+        throw new PillarError(
+          `Invalid --extras entry: "${e}"`,
+          'INVALID_OPTION',
+          `Allowed values: ${[...allowed].join(', ')}`,
+        );
+      }
+    }
+  }
+
+  return out;
+}
+
+function assertOneOf(flag: string, value: string, allowed: readonly string[]): void {
+  if (!allowed.includes(value)) {
+    throw new PillarError(
+      `Invalid value for ${flag}: "${value}"`,
+      'INVALID_OPTION',
+      `Allowed values: ${allowed.join(', ')}`,
+    );
+  }
 }
 
 function getDefaultAnswers(projectName: string): UserAnswers {

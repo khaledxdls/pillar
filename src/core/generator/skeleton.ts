@@ -91,8 +91,16 @@ function layeredImport(camelName: string, targetSuffix: string, architecture?: A
 const SKELETON_GENERATORS: Record<FileKind, (p: SkeletonParams) => string> = {
   controller: ({ pascalName, camelName, isTS, stack, architecture }) => {
     if (stack === 'nestjs') {
+      // DTO types come from the zod-based validator (single source of
+      // truth). Using `Create${pascalName}Dto` / `Update${pascalName}Dto`
+      // without defining them anywhere made the generated project fail to
+      // compile — the E2E smoke harness caught this.
+      const validatorTypeImport = isTS
+        ? [`import type { Create${pascalName}Input, Update${pascalName}Input } from '${layeredImport(camelName, 'validator', architecture)}';`]
+        : [];
       return [
         `import { Controller, Get, Post, Put, Delete, Param, Body } from '@nestjs/common';`,
+        ...validatorTypeImport,
         `import { ${pascalName}Service } from '${layeredImport(camelName, 'service', architecture)}';`,
         '',
         `@Controller('${pluralizeResource(camelName)}')`,
@@ -110,12 +118,12 @@ const SKELETON_GENERATORS: Record<FileKind, (p: SkeletonParams) => string> = {
         '  }',
         '',
         '  @Post()',
-        `  async create(@Body() data${isTS ? `: Create${pascalName}Dto` : ''}) {`,
+        `  async create(@Body() data${isTS ? `: Create${pascalName}Input` : ''}) {`,
         `    return this.${camelName}Service.create(data);`,
         '  }',
         '',
         `  @Put(':id')`,
-        `  async update(@Param('id') id${isTS ? ': string' : ''}, @Body() data${isTS ? `: Update${pascalName}Dto` : ''}) {`,
+        `  async update(@Param('id') id${isTS ? ': string' : ''}, @Body() data${isTS ? `: Update${pascalName}Input` : ''}) {`,
         `    return this.${camelName}Service.update(id, data);`,
         '  }',
         '',
@@ -140,10 +148,14 @@ const SKELETON_GENERATORS: Record<FileKind, (p: SkeletonParams) => string> = {
       const reqRemove = isTS ? `req: FastifyRequest<${idParams}>` : 'req';
       const reply = isTS ? 'res: FastifyReply' : 'res';
 
+      // Create/Update input types are produced by the validator (via
+      // `z.infer`), not by the types file. Importing them from the types
+      // path compiles in isolation but fails `tsc --noEmit` in the real
+      // generated project — the E2E smoke harness catches this.
       const typeImports = isTS
         ? [
             `import type { FastifyRequest, FastifyReply } from 'fastify';`,
-            `import type { Create${pascalName}Input, Update${pascalName}Input } from '${layeredImport(camelName, 'types', architecture)}';`,
+            `import type { Create${pascalName}Input, Update${pascalName}Input } from '${layeredImport(camelName, 'validator', architecture)}';`,
           ]
         : [];
 
@@ -362,18 +374,31 @@ const SKELETON_GENERATORS: Record<FileKind, (p: SkeletonParams) => string> = {
 
   routes: ({ pascalName, camelName, isTS, stack, architecture }) => {
     if (stack === 'fastify') {
+      const plural = pluralizeResource(camelName);
+      // Route generics let Fastify infer `req.params.id` and `req.body` at
+      // the handler boundary so the controller's typed signatures compile.
+      // Without these generics, `app.get(..., (req) => controller.findOne(req, res))`
+      // passes `FastifyRequest<RouteGenericInterface>` into a method expecting
+      // `FastifyRequest<{Params: {id: string}}>` — which tsc rejects.
+      const genericsImport = isTS
+        ? [`import type { Create${pascalName}Input, Update${pascalName}Input } from '${layeredImport(camelName, 'validator', architecture)}';`]
+        : [];
+      const idG = isTS ? `<{ Params: { id: string } }>` : '';
+      const bodyG = isTS ? `<{ Body: Create${pascalName}Input }>` : '';
+      const idBodyG = isTS ? `<{ Params: { id: string }; Body: Update${pascalName}Input }>` : '';
       return [
         `import type { FastifyInstance } from 'fastify';`,
+        ...genericsImport,
         `import { ${pascalName}Controller } from '${layeredImport(camelName, 'controller', architecture)}';`,
         '',
         `const controller = new ${pascalName}Controller();`,
         '',
         `export async function ${camelName}Routes(app${isTS ? ': FastifyInstance' : ''}) {`,
-        `  app.get('/${pluralizeResource(camelName)}', (req, res) => controller.findAll(req, res));`,
-        `  app.get('/${pluralizeResource(camelName)}/:id', (req, res) => controller.findOne(req, res));`,
-        `  app.post('/${pluralizeResource(camelName)}', (req, res) => controller.create(req, res));`,
-        `  app.put('/${pluralizeResource(camelName)}/:id', (req, res) => controller.update(req, res));`,
-        `  app.delete('/${pluralizeResource(camelName)}/:id', (req, res) => controller.remove(req, res));`,
+        `  app.get('/${plural}', (req, res) => controller.findAll(req, res));`,
+        `  app.get${idG}('/${plural}/:id', (req, res) => controller.findOne(req, res));`,
+        `  app.post${bodyG}('/${plural}', (req, res) => controller.create(req, res));`,
+        `  app.put${idBodyG}('/${plural}/:id', (req, res) => controller.update(req, res));`,
+        `  app.delete${idG}('/${plural}/:id', (req, res) => controller.remove(req, res));`,
         '}',
         '',
       ].join('\n');

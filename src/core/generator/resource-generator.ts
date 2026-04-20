@@ -2,7 +2,7 @@ import type { PillarConfig } from '../config/index.js';
 import type { GeneratedFile, GeneratorContext, ResourceField } from './types.js';
 import { generateSkeleton } from './skeleton.js';
 import { resolveResourcePath, LAYERED_DIRS } from '../../utils/resolve-resource-path.js';
-import { toPascalCase, findInterfaceBlock } from '../../utils/naming.js';
+import { toPascalCase, toCamelCase, pluralizeResource, findInterfaceBlock } from '../../utils/naming.js';
 
 interface ResourceOptions {
   name: string;
@@ -62,6 +62,17 @@ export class ResourceGenerator {
       specs = specs.filter((s) => s.suffix !== 'routes');
     }
 
+    // Next.js (App Router) has a fundamentally different HTTP surface:
+    // route handlers live under `src/app/api/<plural>/route.ts` and export
+    // HTTP-verb functions, not Express-style controllers/routers. Emitting
+    // the generic controller/routes pair here generated code that imported
+    // `express` (not a dep in a Next.js project) and failed `tsc --noEmit`
+    // — the E2E smoke harness caught this. A Next.js-specific route
+    // handler is emitted below instead.
+    if (this.context.stack === 'nextjs') {
+      specs = specs.filter((s) => s.suffix !== 'controller' && s.suffix !== 'routes');
+    }
+
     // JS projects don't need a types file
     if (this.context.language === 'javascript') {
       specs = specs.filter((s) => s.suffix !== 'types');
@@ -71,7 +82,7 @@ export class ResourceGenerator {
       specs = specs.filter((s) => only.includes(s.suffix));
     }
 
-    return specs.map((spec) => {
+    const files: GeneratedFile[] = specs.map((spec) => {
       const fileName = `${name}.${spec.suffix}.${ext}`;
       const purpose = spec.purpose(name);
       let content = generateSkeleton(fileName, purpose, this.context);
@@ -91,8 +102,81 @@ export class ResourceGenerator {
         purpose,
       };
     });
+
+    // Next.js App Router: emit a route handler wired to the generated
+    // service. Depth-2 paths (`/api/<plural>/[id]/route.ts`) are not
+    // emitted by default — the user can add them via `pillar add endpoint`
+    // once route-handler extension is wired up. This keeps the smoke
+    // baseline minimal but functional.
+    if (this.context.stack === 'nextjs' && (!only || only.includes('controller') || only.includes('routes'))) {
+      files.push(generateNextRouteHandler({
+        name,
+        ext,
+        basePath,
+        architecture: this.context.architecture,
+      }));
+    }
+
+    return files;
   }
 
+}
+
+function generateNextRouteHandler(opts: {
+  name: string;
+  ext: string;
+  basePath: string;
+  architecture: GeneratorContext['architecture'];
+}): GeneratedFile {
+  const pascalName = toPascalCase(opts.name);
+  const camelName = toCamelCase(opts.name);
+  const plural = pluralizeResource(camelName);
+
+  // Resolve sibling-file paths (service, validator) for the chosen
+  // architecture. Next.js tsconfig maps `@/*` → `src/*`, so every path here
+  // is anchored at `src/` without the `src/` prefix.
+  const importFor = (suffix: string): string => {
+    if (opts.architecture === 'layered') {
+      const dir = LAYERED_DIRS[suffix] ?? suffix;
+      return `@/${dir}/${camelName}.${suffix}.js`;
+    }
+    if (opts.architecture === 'modular') {
+      return `@/modules/${opts.name}/${camelName}.${suffix}.js`;
+    }
+    return `@/features/${opts.name}/${camelName}.${suffix}.js`;
+  };
+
+  const content = [
+    `// Purpose: Next.js App Router handler for /${plural}`,
+    '',
+    `import { NextResponse } from 'next/server';`,
+    `import { ${pascalName}Service } from '${importFor('service')}';`,
+    `import { create${pascalName}Schema } from '${importFor('validator')}';`,
+    '',
+    `const ${camelName}Service = new ${pascalName}Service();`,
+    '',
+    'export async function GET() {',
+    `  const items = await ${camelName}Service.findAll();`,
+    '  return NextResponse.json(items);',
+    '}',
+    '',
+    'export async function POST(request: Request) {',
+    '  const body = await request.json();',
+    `  const parsed = create${pascalName}Schema.safeParse(body);`,
+    '  if (!parsed.success) {',
+    '    return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });',
+    '  }',
+    `  const item = await ${camelName}Service.create(parsed.data);`,
+    '  return NextResponse.json(item, { status: 201 });',
+    '}',
+    '',
+  ].join('\n');
+
+  return {
+    relativePath: `src/app/api/${plural}/route.${opts.ext}`,
+    content,
+    purpose: `Next.js App Router handler for /${plural}`,
+  };
 }
 
 const TS_TYPE_MAP: Record<string, string> = {

@@ -27,8 +27,19 @@ program
 program
   .command('init [project-name]')
   .description('Initialize a new project with an interactive wizard')
-  .option('-y, --yes', 'Skip prompts and use defaults')
-  .action(async (projectName: string | undefined, options: { yes?: boolean }) => {
+  .option('-y, --yes', 'Skip prompts and use defaults (may be combined with the non-interactive flags below)')
+  .option('--stack <stack>', 'Stack: express, fastify, nestjs, hono, nextjs')
+  .option('--category <category>', 'Category: api or fullstack')
+  .option('--language <language>', 'Language: typescript or javascript')
+  .option('--database <database>', 'Database: postgresql, mongodb, sqlite, none')
+  .option('--orm <orm>', 'ORM: prisma, drizzle, typeorm, mongoose, none')
+  .option('--architecture <arch>', 'Architecture: feature-first, layered, modular')
+  .option('--package-manager <pm>', 'Package manager: npm, yarn, pnpm')
+  .option('--test-framework <framework>', 'Test framework: vitest, jest')
+  .option('--extras <list>', 'Comma-separated extras: docker,linting,gitHooks')
+  .option('--skip-install', 'Skip dependency installation (useful for CI / E2E harnesses)')
+  .option('--skip-git', 'Skip git repository initialization')
+  .action(async (projectName: string | undefined, options) => {
     const { initCommand } = await import('../commands/init.js');
     await initCommand(projectName, options);
   });
@@ -284,6 +295,22 @@ program
   .action(async (targetPath: string) => {
     const { explainCommand } = await import('../commands/explain.js');
     await explainCommand(targetPath);
+  });
+
+// --- pillar lint ---
+const lintCmd = program
+  .command('lint')
+  .description('Static analysis for architecture, imports, and project structure');
+
+lintCmd
+  .command('architecture')
+  .alias('arch')
+  .description('Enforce the architectural pattern chosen at init (feature-first / layered / modular)')
+  .option('--no-strict', 'Do not exit with code 1 on errors')
+  .option('--json', 'Emit machine-readable JSON for CI integration')
+  .action(async (options: { strict?: boolean; json?: boolean }) => {
+    const { lintArchitectureCommand } = await import('../commands/lint.js');
+    await lintArchitectureCommand(options);
   });
 
 // --- pillar undo ---
