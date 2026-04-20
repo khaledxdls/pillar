@@ -192,6 +192,24 @@ async function runStack(stack) {
       return { stack: stack.name, ok: false, reason: failure, durationMs: Date.now() - started };
     }
 
+    // 3b. pillar add auth — scaffolds the JWT auth module. Runs npm install
+    //     again to pull in jsonwebtoken/bcryptjs so the generated code can
+    //     actually resolve its imports during type-check.
+    const authRes = await run(prefix, process.execPath, [
+      pillarBin, 'add', 'auth', '--strategy', 'jwt',
+    ], { cwd: projectDir, timeoutMs: 60_000 });
+    if (authRes.code !== 0) {
+      failure = `pillar add auth failed (exit ${authRes.code})`;
+      return { stack: stack.name, ok: false, reason: failure, durationMs: Date.now() - started };
+    }
+    const authInstall = await run(prefix, 'npm', ['install', '--no-audit', '--no-fund', '--loglevel=error'], {
+      cwd: projectDir, timeoutMs: args.installTimeoutMs,
+    });
+    if (authInstall.code !== 0) {
+      failure = `npm install (post-auth) failed (exit ${authInstall.code})`;
+      return { stack: stack.name, ok: false, reason: failure, durationMs: Date.now() - started };
+    }
+
     // 4. Type-check the generated project. This is the actual regression
     //    gate: every stack-specific scaffolding bug surfaces here.
     const tscBin = path.join(projectDir, 'node_modules', '.bin', 'tsc');
