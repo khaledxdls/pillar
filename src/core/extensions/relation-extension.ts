@@ -3,8 +3,9 @@ import fs from 'fs-extra';
 import type { PillarConfig } from '../config/index.js';
 import type { FileOperation } from '../history/types.js';
 import { resolveResourceFilePath } from '../../utils/resolve-resource-path.js';
-import { escapeRegex, assertSafeResourceName } from '../../utils/sanitize.js';
-import { toPascalCase, pluralizeResource, findInterfaceBlock } from '../../utils/naming.js';
+import { assertSafeResourceName } from '../../utils/sanitize.js';
+import { toPascalCase, pluralizeResource } from '../../utils/naming.js';
+import { addFieldsToInterface, addMethodToClass, ensureNamedImport } from '../ast/index.js';
 
 export type RelationType = 'one-to-one' | 'one-to-many' | 'many-to-many';
 
@@ -20,101 +21,146 @@ interface RelationResult {
 }
 
 /**
- * Add a relation between two resources.
+ * Add a relation between two resources via AST transforms.
  *
- * Updates:
- *   - Source model/types: adds the relation field
- *   - Target model/types: adds the inverse relation field
- *   - Source repository: adds a method to fetch related records
+ * Touches three things:
+ *   - source `types`/`model`: adds the forward relation field + type import
+ *   - target `types`/`model`: adds the inverse relation field + type import
+ *   - source `repository`: adds a stub finder method + target model import
+ *
+ * Every edit is idempotent (re-running the command is safe) and is
+ * recorded as a `FileOperation` so `pillar undo` can reverse it.
  */
 export async function addRelationToResource(
   projectRoot: string,
   config: PillarConfig,
   relation: RelationDefinition,
 ): Promise<RelationResult> {
+  assertSafeResourceName(relation.sourceResource);
+  assertSafeResourceName(relation.targetResource);
+
   const ext = config.project.language === 'typescript' ? 'ts' : 'js';
   const isTS = config.project.language === 'typescript';
   const arch = config.project.architecture;
   const operations: FileOperation[] = [];
   const modifiedFiles: string[] = [];
 
+  // Interfaces only exist in TS — relations on JS projects are a no-op by
+  // design (the repository method stub is also skipped since there's no
+  // compile-time type to import).
+  if (!isTS) return { operations, modifiedFiles };
+
   const { sourceField, sourceType, inverseField, inverseType } = deriveFieldNames(relation);
-
-  const targetPascal = toPascalCase(relation.targetResource);
   const sourcePascal = toPascalCase(relation.sourceResource);
+  const targetPascal = toPascalCase(relation.targetResource);
 
-  // 1. Update source types/model
+  // Forward side: source interface gains `targetField: TargetType`.
   for (const suffix of ['types', 'model'] as const) {
-    const filePath = path.join(projectRoot, resolveResourceFilePath(arch, relation.sourceResource, suffix, ext));
-    if (!await fs.pathExists(filePath)) continue;
+    const ownerFile = path.join(projectRoot, resolveResourceFilePath(arch, relation.sourceResource, suffix, ext));
+    const peerFile = path.join(projectRoot, resolveResourceFilePath(arch, relation.targetResource, suffix, ext));
+    if (!(await fs.pathExists(ownerFile)) || !(await fs.pathExists(peerFile))) continue;
 
-    const targetFilePath = path.join(projectRoot, resolveResourceFilePath(arch, relation.targetResource, suffix, ext));
-    if (!await fs.pathExists(targetFilePath)) continue;
-
-    const importSpec = buildRelativeImport(filePath, targetFilePath, targetPascal);
-    await injectImportIfMissing(filePath, importSpec.line, targetPascal);
-
-    const result = await injectRelationField(filePath, relation.sourceResource, sourceField, sourceType, isTS);
-    if (result) {
-      operations.push(result.operation);
-      modifiedFiles.push(path.relative(projectRoot, filePath));
-    }
+    const op = await injectRelationIntoInterface(
+      ownerFile, peerFile, sourcePascal, targetPascal, sourceField, sourceType,
+    );
+    if (op) { operations.push(op); modifiedFiles.push(path.relative(projectRoot, ownerFile)); }
   }
 
-  // 2. Update target types/model (inverse side)
+  // Inverse side: target interface gains `sourceField: SourceType`.
   for (const suffix of ['types', 'model'] as const) {
-    const filePath = path.join(projectRoot, resolveResourceFilePath(arch, relation.targetResource, suffix, ext));
-    if (!await fs.pathExists(filePath)) continue;
+    const ownerFile = path.join(projectRoot, resolveResourceFilePath(arch, relation.targetResource, suffix, ext));
+    const peerFile = path.join(projectRoot, resolveResourceFilePath(arch, relation.sourceResource, suffix, ext));
+    if (!(await fs.pathExists(ownerFile)) || !(await fs.pathExists(peerFile))) continue;
 
-    const sourceFilePath = path.join(projectRoot, resolveResourceFilePath(arch, relation.sourceResource, suffix, ext));
-    if (!await fs.pathExists(sourceFilePath)) continue;
-
-    const importSpec = buildRelativeImport(filePath, sourceFilePath, sourcePascal);
-    await injectImportIfMissing(filePath, importSpec.line, sourcePascal);
-
-    const result = await injectRelationField(filePath, relation.targetResource, inverseField, inverseType, isTS);
-    if (result) {
-      operations.push(result.operation);
-      modifiedFiles.push(path.relative(projectRoot, filePath));
-    }
+    const op = await injectRelationIntoInterface(
+      ownerFile, peerFile, targetPascal, sourcePascal, inverseField, inverseType,
+    );
+    if (op) { operations.push(op); modifiedFiles.push(path.relative(projectRoot, ownerFile)); }
   }
 
-  // 3. Add finder method to source repository (with target type import)
+  // Source repository gets a stub finder (e.g., `findPosts(userId)`).
   const repoPath = path.join(projectRoot, resolveResourceFilePath(arch, relation.sourceResource, 'repository', ext));
   if (await fs.pathExists(repoPath)) {
     const targetModelPath = path.join(projectRoot, resolveResourceFilePath(arch, relation.targetResource, 'model', ext));
-    if (await fs.pathExists(targetModelPath)) {
-      const repoImport = buildRelativeImport(repoPath, targetModelPath, targetPascal);
-      await injectImportIfMissing(repoPath, repoImport.line, targetPascal);
-    }
-
-    const result = await injectRelationMethod(repoPath, relation, isTS);
-    if (result) {
-      operations.push(result.operation);
-      modifiedFiles.push(path.relative(projectRoot, repoPath));
-    }
+    const op = await injectRelationMethod(repoPath, targetModelPath, relation, sourcePascal, targetPascal);
+    if (op) { operations.push(op); modifiedFiles.push(path.relative(projectRoot, repoPath)); }
   }
 
   return { operations, modifiedFiles };
 }
 
 /**
- * Build a correct relative import line between two absolute file paths.
- * Handles .ts → .js extension mapping and ensures the path starts with ./ or ../
+ * Add a typed field to an interface (and its type import) via ts-morph.
+ *
+ * Returns null when the interface is not found in the source — the caller
+ * skips the file rather than writing a half-applied edit.
  */
-function buildRelativeImport(
-  fromFile: string,
-  toFile: string,
-  typeName: string,
-): { line: string } {
-  let rel = path.relative(path.dirname(fromFile), toFile).replace(/\\/g, '/');
-  // Map .ts/.tsx extensions to .js for ESM compatibility
-  rel = rel.replace(/\.tsx?$/, '.js');
-  // Ensure the path starts with ./ for same-directory imports
-  if (!rel.startsWith('.')) {
-    rel = './' + rel;
+async function injectRelationIntoInterface(
+  ownerFile: string,
+  peerFile: string,
+  ownerInterfaceName: string,
+  peerTypeName: string,
+  fieldName: string,
+  fieldType: string,
+): Promise<FileOperation | null> {
+  const previousContent = await fs.readFile(ownerFile, 'utf-8');
+  const importSpec = buildRelativeImportPath(ownerFile, peerFile);
+
+  const afterImport = ensureNamedImport(previousContent, importSpec, peerTypeName, 'type');
+  const afterField = addFieldsToInterface(afterImport, ownerInterfaceName, [
+    { name: fieldName, type: fieldType, optional: true },
+  ]);
+  if (afterField === null || afterField === previousContent) return null;
+
+  await fs.writeFile(ownerFile, afterField, 'utf-8');
+  return { type: 'modify', path: ownerFile, previousContent };
+}
+
+/**
+ * Append a finder method to the source repository class, plus the target
+ * model type import. Idempotent on method name.
+ */
+async function injectRelationMethod(
+  repoPath: string,
+  targetModelPath: string,
+  relation: RelationDefinition,
+  sourcePascal: string,
+  targetPascal: string,
+): Promise<FileOperation | null> {
+  const previousContent = await fs.readFile(repoPath, 'utf-8');
+
+  const methodName = relation.type === 'one-to-one'
+    ? `find${targetPascal}`
+    : `find${toPascalCase(pluralizeResource(relation.targetResource))}`;
+
+  const returnType = relation.type === 'one-to-one'
+    ? `Promise<${targetPascal} | null>`
+    : `Promise<${targetPascal}[]>`;
+
+  const method = [
+    `// Fetch related ${relation.targetResource}(s) for this ${relation.sourceResource}.`,
+    `async ${methodName}(id: string): ${returnType} {`,
+    `  // TODO: implement — query ${relation.targetResource}(s) by ${relation.sourceResource} id`,
+    `  throw new Error('Not implemented');`,
+    `}`,
+  ].join('\n');
+
+  let updated = previousContent;
+
+  // Import the target model type if we have a file to import it from.
+  // Skipping the import is tolerable (downstream tsc will flag it) rather
+  // than aborting the whole method injection.
+  if (await fs.pathExists(targetModelPath)) {
+    const importSpec = buildRelativeImportPath(repoPath, targetModelPath);
+    updated = ensureNamedImport(updated, importSpec, targetPascal, 'type');
   }
-  return { line: `import type { ${typeName} } from '${rel}';` };
+
+  const className = `${sourcePascal}Repository`;
+  const afterMethod = addMethodToClass(updated, className, method);
+  if (afterMethod === null || afterMethod === previousContent) return null;
+
+  await fs.writeFile(repoPath, afterMethod, 'utf-8');
+  return { type: 'modify', path: repoPath, previousContent };
 }
 
 function deriveFieldNames(relation: RelationDefinition): {
@@ -123,8 +169,7 @@ function deriveFieldNames(relation: RelationDefinition): {
   inverseField: string;
   inverseType: string;
 } {
-  const target = relation.targetResource;
-  const source = relation.sourceResource;
+  const { sourceResource: source, targetResource: target } = relation;
   const targetPascal = toPascalCase(target);
   const sourcePascal = toPascalCase(source);
   const targetPlural = pluralizeResource(target);
@@ -132,131 +177,22 @@ function deriveFieldNames(relation: RelationDefinition): {
 
   switch (relation.type) {
     case 'one-to-one':
-      return {
-        sourceField: target,
-        sourceType: targetPascal,
-        inverseField: source,
-        inverseType: sourcePascal,
-      };
+      return { sourceField: target, sourceType: targetPascal, inverseField: source, inverseType: sourcePascal };
     case 'one-to-many':
-      return {
-        sourceField: targetPlural,
-        sourceType: `${targetPascal}[]`,
-        inverseField: source,
-        inverseType: sourcePascal,
-      };
+      return { sourceField: targetPlural, sourceType: `${targetPascal}[]`, inverseField: source, inverseType: sourcePascal };
     case 'many-to-many':
-      return {
-        sourceField: targetPlural,
-        sourceType: `${targetPascal}[]`,
-        inverseField: sourcePlural,
-        inverseType: `${sourcePascal}[]`,
-      };
+      return { sourceField: targetPlural, sourceType: `${targetPascal}[]`, inverseField: sourcePlural, inverseType: `${sourcePascal}[]` };
   }
-}
-
-async function injectRelationField(
-  filePath: string,
-  resourceName: string,
-  fieldName: string,
-  fieldType: string,
-  isTS: boolean,
-): Promise<{ operation: FileOperation } | null> {
-  const content = await fs.readFile(filePath, 'utf-8');
-
-  // Skip if field already exists
-  if (content.includes(`${fieldName}:`) || content.includes(`${fieldName}?:`)) return null;
-
-  assertSafeResourceName(resourceName);
-  const pascalName = toPascalCase(resourceName);
-  const block = findInterfaceBlock(content, pascalName);
-  if (!block) return null;
-
-  const line = isTS
-    ? `  ${fieldName}?: ${fieldType};`
-    : `  ${fieldName}: null,`;
-
-  const body = block.body.replace(/\s+$/, '');
-  const separator = body.length === 0 ? '' : '\n';
-  const updated =
-    content.slice(0, block.openBrace + 1) +
-    body +
-    `${separator}\n${line}\n` +
-    content.slice(block.closeBrace);
-  if (updated === content) return null;
-
-  const previousContent = content;
-  await fs.writeFile(filePath, updated, 'utf-8');
-  return { operation: { type: 'modify', path: filePath, previousContent } };
-}
-
-async function injectRelationMethod(
-  repoPath: string,
-  relation: RelationDefinition,
-  isTS: boolean,
-): Promise<{ operation: FileOperation } | null> {
-  const content = await fs.readFile(repoPath, 'utf-8');
-  const previousContent = content;
-
-  const target = relation.targetResource;
-  const targetPascal = toPascalCase(target);
-  const methodName = relation.type === 'one-to-one'
-    ? `find${targetPascal}`
-    : `find${toPascalCase(pluralizeResource(target))}`;
-
-  // Skip if method already exists
-  if (content.includes(`${methodName}(`)) return null;
-
-  const idParam = isTS ? 'id: string' : 'id';
-  const returnType = isTS
-    ? (relation.type === 'one-to-one' ? `: Promise<${targetPascal} | null>` : `: Promise<${targetPascal}[]>`)
-    : '';
-
-  const method = [
-    '',
-    `  // Fetch related ${target}(s) for this ${relation.sourceResource}`,
-    `  async ${methodName}(${idParam})${returnType} {`,
-    `    // TODO: implement — query ${target}(s) by ${relation.sourceResource} id`,
-    `    throw new Error('Not implemented');`,
-    `  }`,
-  ].join('\n');
-
-  // Insert before the last closing brace of the class
-  const lastBrace = content.lastIndexOf('}');
-  if (lastBrace === -1) return null;
-
-  const updated = content.slice(0, lastBrace) + method + '\n' + content.slice(lastBrace);
-  await fs.writeFile(repoPath, updated, 'utf-8');
-  return { operation: { type: 'modify', path: repoPath, previousContent } };
 }
 
 /**
- * Add an import statement to a file if the type name is not already imported.
+ * Build an ESM-compatible relative import specifier from `fromFile` to
+ * `toFile`. Maps `.ts`/`.tsx` to `.js` (Node16 module resolution) and
+ * ensures the path is explicitly relative.
  */
-async function injectImportIfMissing(filePath: string, importLine: string, typeName: string): Promise<void> {
-  const content = await fs.readFile(filePath, 'utf-8');
-
-  // Skip if the type is already imported
-  if (content.includes(`import`) && content.includes(typeName) && content.match(new RegExp(`import.*\\b${escapeRegex(typeName)}\\b.*from`))) {
-    return;
-  }
-
-  // Add import after the last existing import or at the top
-  const lines = content.split('\n');
-  let lastImportIndex = -1;
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i]!.trim().startsWith('import ')) {
-      lastImportIndex = i;
-    }
-  }
-
-  if (lastImportIndex >= 0) {
-    lines.splice(lastImportIndex + 1, 0, importLine);
-  } else {
-    // Insert after the purpose comment
-    const purposeIndex = lines.findIndex((l) => l.startsWith('// Purpose:'));
-    lines.splice(purposeIndex >= 0 ? purposeIndex + 1 : 0, 0, '', importLine);
-  }
-
-  await fs.writeFile(filePath, lines.join('\n'), 'utf-8');
+function buildRelativeImportPath(fromFile: string, toFile: string): string {
+  let rel = path.relative(path.dirname(fromFile), toFile).replace(/\\/g, '/');
+  rel = rel.replace(/\.tsx?$/, '.js');
+  if (!rel.startsWith('.')) rel = './' + rel;
+  return rel;
 }
