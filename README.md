@@ -69,6 +69,29 @@ Options:
 | Flag | Description |
 |------|-------------|
 | `-y, --yes` | Skip prompts and use defaults |
+| `--stack <stack>` | `express`, `fastify`, `nestjs`, `hono`, `nextjs` |
+| `--category <cat>` | `api` or `fullstack` |
+| `--language <lang>` | `typescript` or `javascript` |
+| `--database <db>` | `postgresql`, `mongodb`, `sqlite`, `none` |
+| `--orm <orm>` | `prisma`, `drizzle`, `typeorm`, `mongoose`, `none` |
+| `--architecture <arch>` | `feature-first`, `layered`, `modular` |
+| `--package-manager <pm>` | `npm`, `yarn`, `pnpm` |
+| `--test-framework <fw>` | `vitest` or `jest` |
+| `--extras <list>` | Comma-separated: `docker,linting,gitHooks` |
+| `--skip-install` | Skip `npm install` (useful for CI / E2E harnesses) |
+| `--skip-git` | Skip git repository initialization |
+
+Any flag presence auto-enables non-interactive mode — `-y` is optional when overrides are provided. Invalid values fail fast with the allowed list.
+
+```bash
+# Fully non-interactive — great for CI / scripts
+pillar init my-api \
+  --stack fastify --category api --language typescript \
+  --database postgresql --orm drizzle \
+  --architecture feature-first \
+  --package-manager pnpm --test-framework vitest \
+  --skip-install --skip-git
+```
 
 ---
 
@@ -219,6 +242,59 @@ Options:
 | Flag | Description |
 |------|-------------|
 | `-t, --type <type>` | `one-to-one`, `one-to-many`, or `many-to-many` (default: `one-to-many`) |
+
+---
+
+### `pillar add auth --strategy jwt`
+
+Scaffold a complete, stack-aware JWT authentication module in one command.
+
+```bash
+pillar add auth --strategy jwt
+```
+
+Generates (paths vary by architecture — example is feature-first):
+
+```
+src/features/auth/
+  auth.types.ts        # AuthUser, PublicUser, AuthResponse
+  auth.validator.ts    # Zod schemas for register/login (+ inferred types)
+  auth.repository.ts   # User persistence (in-memory stub — swap for your DB)
+  jwt.util.ts          # Sign/verify JWTs (enforces a 16-char secret minimum)
+  auth.service.ts      # register, login, token introspection (timing-safe)
+  auth.controller.ts   # Stack-specific HTTP handlers
+  auth.middleware.ts   # Bearer-token verification (Express/Fastify/Hono)
+  auth.routes.ts       # POST /auth/register, POST /auth/login, GET /auth/me
+```
+
+Stack-aware emission:
+
+| Stack | What you get |
+|-------|--------------|
+| **Express / Fastify / Hono** | controller + middleware + routes, auto-registered in `app.ts` |
+| **NestJS** | controller + `AuthGuard` + `AuthModule` (auto-added to `AppModule.imports`) |
+| **Next.js** | App Router handlers at `src/app/api/auth/{register,login,me}/route.ts` |
+
+Side effects (all recorded in history — a single `pillar undo` reverses the entire scaffold):
+
+- Adds `jsonwebtoken` + `bcryptjs` (+ `@types/*`) to `package.json`
+- Adds `JWT_SECRET` + `JWT_EXPIRES_IN` to `.env` and `.env.example`
+- Wires the router/module into the app entry
+
+Security defaults:
+
+- `bcrypt` with 12 rounds, 72-byte password cap (bcrypt truncates past that)
+- Constant-time login — runs `bcrypt.compare` even when the user doesn't exist to prevent enumeration via timing
+- `jwt.util` throws at startup if `JWT_SECRET` is missing or shorter than 16 chars
+
+Options:
+
+| Flag | Description |
+|------|-------------|
+| `-s, --strategy <strategy>` | Auth strategy (currently: `jwt`) |
+| `--dry-run` | Preview files/deps/env changes without writing |
+| `-f, --force` | Overwrite existing files |
+| `--files-only` | Emit files only — skip `package.json` / env / app wiring |
 
 ---
 
@@ -511,6 +587,39 @@ Checks performed:
 
 ---
 
+### `pillar lint architecture`
+
+Static analysis that enforces the architectural pattern chosen at `init`. Catches layering violations, cross-feature imports, DB driver leaks, and circular dependencies before they reach review.
+
+```bash
+pillar lint architecture          # human-readable report; exits 1 on errors
+pillar lint arch                  # short alias
+pillar lint architecture --json   # machine-readable output for CI
+pillar lint architecture --no-strict   # never fail the exit code
+```
+
+Rules applied:
+
+| ID | Rule |
+|----|------|
+| `AL001` | Controllers must not import repositories directly (go through the service). |
+| `AL002` | Repositories must not depend on services (wrong layer direction). |
+| `AL003` | Feature-first projects: no cross-feature imports between `src/features/*`. |
+| `AL004` | Modular projects: no cross-module imports between `src/modules/*`. |
+| `AL005` | Database drivers (`pg`, `mongodb`, `@prisma/client`, `drizzle-orm/*`, `typeorm/*`, etc.) may only be imported from repositories or models. |
+| `AL006` | No circular dependencies anywhere under `src/`. |
+
+Test files (`*.test.*`, `*.spec.*`) are excluded so integration fixtures can legitimately cross layers.
+
+Options:
+
+| Flag | Description |
+|------|-------------|
+| `--no-strict` | Do not exit with code 1 on errors |
+| `--json` | Emit machine-readable JSON for CI integration |
+
+---
+
 ### `pillar env`
 
 Manage environment variables.
@@ -710,6 +819,7 @@ Every generation command follows these rules:
 | `pillar add field <resource> <fields...>` | Add fields to an existing resource |
 | `pillar add endpoint <resource> <def>` | Add a custom endpoint |
 | `pillar add relation <source> <target>` | Add a relation between resources |
+| `pillar add auth --strategy jwt` | Scaffold a JWT authentication module |
 | `pillar add middleware <name>` | Generate a middleware file |
 | `pillar add linting` | Set up ESLint + Prettier |
 | `pillar add git-hooks` | Set up Husky + lint-staged |
@@ -721,6 +831,7 @@ Every generation command follows these rules:
 | `pillar seed generate <resource>` | Generate seed data |
 | `pillar seed run` | Execute all seed files |
 | `pillar doctor` | Run health diagnostics |
+| `pillar lint architecture` | Enforce the chosen architectural pattern |
 | `pillar env validate` | Check .env against .env.example |
 | `pillar env sync` | Sync missing env keys |
 | `pillar env add <key>` | Add an environment variable |
@@ -731,6 +842,40 @@ Every generation command follows these rules:
 | `pillar config list` | Show full configuration |
 | `pillar config get <key>` | Get a config value |
 | `pillar config set <key> <value>` | Set a config value |
+
+---
+
+## Development
+
+```bash
+npm run build          # Compile TypeScript to dist/
+npm run dev            # Watch mode
+npm test               # Run all unit tests (vitest)
+npm run test:watch     # Watch mode
+npm run test:e2e       # End-to-end smoke across all 5 stacks
+npx tsc --noEmit       # Type-check without emitting
+```
+
+### E2E smoke harness
+
+`scripts/e2e-smoke.mjs` is the canonical regression gate for generation. For every supported stack it runs:
+
+1. `pillar init` (non-interactive, `--skip-install --skip-git`)
+2. `npm install` inside the scaffolded project
+3. `pillar add resource user --fields "name:string email:string"`
+4. `pillar add auth --strategy jwt` (+ re-install for the new deps)
+5. `tsc --noEmit` on the scaffolded project
+
+A stack passes only when the generated project type-checks end-to-end. Unit tests alone can't catch stack-specific bugs (wrong type imports, Fastify route-generic omissions, NestJS missing DTOs, Next.js importing Express) — those only surface when the generated code is actually compiled.
+
+```bash
+npm run test:e2e                          # all stacks, serial
+npm run test:e2e -- --jobs 3              # parallel
+npm run test:e2e -- --only express,hono   # subset
+npm run test:e2e -- --keep                # preserve failing temp dirs for debugging
+```
+
+Always run this before shipping changes to any skeleton, resource-generator, or extension code path.
 
 ---
 
