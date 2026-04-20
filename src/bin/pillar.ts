@@ -122,6 +122,18 @@ addCmd
   });
 
 addCmd
+  .command('auth')
+  .description('Scaffold an authentication module (JWT strategy)')
+  .option('-s, --strategy <strategy>', 'Auth strategy (currently: jwt)', 'jwt')
+  .option('--dry-run', 'Preview without creating')
+  .option('-f, --force', 'Overwrite existing files')
+  .option('--files-only', 'Emit files only — skip package.json / env / app wiring')
+  .action(async (options: { strategy?: string; dryRun?: boolean; force?: boolean; filesOnly?: boolean }) => {
+    const { addAuthCommand } = await import('../commands/auth.js');
+    await addAuthCommand(options);
+  });
+
+addCmd
   .command('relation <source> <target>')
   .description('Add a relation between resources (e.g., "user posts --type one-to-many")')
   .option('-t, --type <type>', 'Relation type: one-to-one, one-to-many, many-to-many', 'one-to-many')
