@@ -300,20 +300,43 @@ Options:
 
 ### `pillar add middleware <name>`
 
-Generate a middleware file with stack-aware type imports (Express `NextFunction`, Fastify `HookHandlerDoneFunction`, Hono `Next`).
+Generates a middleware file. **Known production kinds** (`cors`, `rate-limit`, `helmet`, `request-id`) get a full stack-aware scaffold: template, npm deps, env keys, and AST wiring into the app entry. Any other name falls back to a generic stub with stack-aware type imports (Express `NextFunction`, Fastify `HookHandlerDoneFunction`, Hono `Next`).
 
 ```bash
-pillar add middleware auth
-pillar add middleware rate-limit -p "Rate limiting per IP"
+pillar add middleware cors          # CORS with CORS_ORIGIN env-driven policy
+pillar add middleware rate-limit    # Per-IP rate limiter (RATE_LIMIT_WINDOW_MS / RATE_LIMIT_MAX)
+pillar add middleware helmet        # Secure HTTP headers (CSP, HSTS, frame-options, …)
+pillar add middleware request-id    # Correlation ID (honors inbound x-request-id)
+
+pillar add middleware my-custom -p "Feature-flag gate"   # generic stub fallback
 ```
+
+**Known kinds — stack-aware emission:**
+
+| Kind | Express | Fastify | NestJS | Hono | Next.js |
+|------|---------|---------|--------|------|---------|
+| `cors` | `cors` + `@types/cors`, `app.use(corsMiddleware())` | `@fastify/cors` registered in factory | built-in `app.enableCors(corsOptions)` (no npm dep) | `hono/cors` (built-in) | helper only (no auto-wiring) |
+| `rate-limit` | `express-rate-limit`, `app.use(rateLimiter)` | `@fastify/rate-limit` registered in factory | `express-rate-limit`, `app.use(rateLimiter)` in `main.ts` | `hono-rate-limiter` | in-memory token bucket helper |
+| `helmet` | `helmet`, `app.use(securityHeaders())` | `@fastify/helmet` registered in factory | `helmet`, `app.use(securityHeaders())` in `main.ts` | no-dep header middleware | header helper only |
+| `request-id` | no deps, `app.use(requestId())` | no deps, `onRequest` hook | no deps (structurally typed — no `@types/express` needed) | no deps, `app.use('*', requestId)` | `resolveRequestId(req)` helper |
+
+**Side effects** (known kinds, unless `--files-only`):
+
+- Writes `src/middleware/<kind>.middleware.ts`.
+- Merges deps into `package.json` (never downgrades pinned versions).
+- Adds env keys to `.env` and `.env.example` (idempotent) — `CORS_ORIGIN` for `cors`, `RATE_LIMIT_WINDOW_MS` + `RATE_LIMIT_MAX` for `rate-limit`.
+- Splices `import` + registration statement into `src/app.ts` (Express/Fastify/Hono) or `src/main.ts` (NestJS) via AST — idempotent, so re-running is safe.
+- Records a single history entry; `pillar undo` reverses the whole scaffold in one step.
+- Next.js emissions are helper-only (no auto-wiring at the edge) — integrate from your `src/middleware.ts` or inside route handlers.
 
 Options:
 
 | Flag | Description |
 |------|-------------|
-| `-p, --purpose <text>` | Purpose of this middleware |
-| `--dry-run` | Preview without creating |
-| `-f, --force` | Overwrite if file exists |
+| `-p, --purpose <text>` | Purpose (used by the generic fallback; ignored for known kinds) |
+| `--dry-run` | Preview files, deps, env keys, and the wiring target without writing |
+| `-f, --force` | Overwrite existing middleware file |
+| `--files-only` | Emit files only — skip `package.json` / `.env` / app-entry wiring (known kinds only) |
 
 ---
 
@@ -820,7 +843,7 @@ Every generation command follows these rules:
 | `pillar add endpoint <resource> <def>` | Add a custom endpoint |
 | `pillar add relation <source> <target>` | Add a relation between resources |
 | `pillar add auth --strategy jwt` | Scaffold a JWT authentication module |
-| `pillar add middleware <name>` | Generate a middleware file |
+| `pillar add middleware <kind>` | Scaffold middleware — `cors`, `rate-limit`, `helmet`, `request-id` (stack-aware + wired), or any name (generic stub) |
 | `pillar add linting` | Set up ESLint + Prettier |
 | `pillar add git-hooks` | Set up Husky + lint-staged |
 | `pillar map` | View/refresh/validate the project map |
