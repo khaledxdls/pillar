@@ -1,6 +1,6 @@
 {
   "name": "@pillar-cli/pillar",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "AI-aware architecture engine — scaffold, generate, and maintain production-ready projects",
   "type": "module",
   "bin": {
