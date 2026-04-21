@@ -77,11 +77,12 @@ addCmd
 
 addCmd
   .command('middleware <name>')
-  .description('Generate a middleware file (e.g., "auth", "rate-limit")')
-  .option('-p, --purpose <text>', 'Purpose of this middleware')
+  .description('Generate a middleware file. Known kinds (cors, rate-limit, helmet, request-id) get full stack-aware scaffolding; other names fall back to a generic stub.')
+  .option('-p, --purpose <text>', 'Purpose (required for generic middleware only when generation.purposeRequired is true)')
   .option('--dry-run', 'Preview without creating')
   .option('-f, --force', 'Overwrite if file exists')
-  .action(async (name: string, options: { purpose?: string; dryRun?: boolean; force?: boolean }) => {
+  .option('--files-only', 'Emit files only — skip package.json / env / app-entry wiring (known kinds only)')
+  .action(async (name: string, options: { purpose?: string; dryRun?: boolean; force?: boolean; filesOnly?: boolean }) => {
     const { addMiddlewareCommand } = await import('../commands/add.js');
     await addMiddlewareCommand(name, options);
   });

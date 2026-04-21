@@ -210,6 +210,27 @@ async function runStack(stack) {
       return { stack: stack.name, ok: false, reason: failure, durationMs: Date.now() - started };
     }
 
+    // 3c. pillar add middleware — exercise every supported kind so that all
+    //     four stack-specific templates (and their wiring paths) compile.
+    //     Runs one aggregate install afterwards for any new runtime deps.
+    const MIDDLEWARE_KINDS = ['cors', 'rate-limit', 'helmet', 'request-id'];
+    for (const kind of MIDDLEWARE_KINDS) {
+      const mwRes = await run(prefix, process.execPath, [
+        pillarBin, 'add', 'middleware', kind,
+      ], { cwd: projectDir, timeoutMs: 60_000 });
+      if (mwRes.code !== 0) {
+        failure = `pillar add middleware ${kind} failed (exit ${mwRes.code})`;
+        return { stack: stack.name, ok: false, reason: failure, durationMs: Date.now() - started };
+      }
+    }
+    const mwInstall = await run(prefix, 'npm', ['install', '--no-audit', '--no-fund', '--loglevel=error'], {
+      cwd: projectDir, timeoutMs: args.installTimeoutMs,
+    });
+    if (mwInstall.code !== 0) {
+      failure = `npm install (post-middleware) failed (exit ${mwInstall.code})`;
+      return { stack: stack.name, ok: false, reason: failure, durationMs: Date.now() - started };
+    }
+
     // 4. Type-check the generated project. This is the actual regression
     //    gate: every stack-specific scaffolding bug surfaces here.
     const tscBin = path.join(projectDir, 'node_modules', '.bin', 'tsc');

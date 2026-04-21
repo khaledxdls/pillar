@@ -11,7 +11,14 @@ import type { ResourceField } from '../core/generator/types.js';
 import { logger, findProjectRoot, withSpinner } from '../utils/index.js';
 import { resolveResourcePath, resolveResourceFilePath } from '../utils/resolve-resource-path.js';
 import { toPascalCase, toCamelCase, pluralizeResource } from '../utils/naming.js';
-import { addElementToDecoratorArray, ensureNamedImport } from '../core/ast/index.js';
+import { addElementToDecoratorArray, addModuleStatement, ensureNamedImport } from '../core/ast/index.js';
+import { EnvManager } from '../core/env/index.js';
+import {
+  MiddlewareGenerator,
+  SUPPORTED_MIDDLEWARE_KINDS,
+  type MiddlewareKind,
+  type MiddlewareWiring,
+} from '../core/middleware/index.js';
 
 interface AddResourceOptions {
   fields?: string;
@@ -163,8 +170,22 @@ interface AddMiddlewareOptions {
   purpose?: string;
   dryRun?: boolean;
   force?: boolean;
+  /** Emit files only — skip package.json / .env / app-entry wiring. */
+  filesOnly?: boolean;
 }
 
+/**
+ * `pillar add middleware <kind>` — two shapes share this command:
+ *
+ *   1. **Known production kinds** (`cors`, `rate-limit`, `helmet`, `request-id`):
+ *      emits a stack-aware template, adds deps to package.json, adds env keys,
+ *      and splices the registration statement into the app entry via AST.
+ *      History-backed — `pillar undo` reverses the whole scaffold in one step.
+ *
+ *   2. **Arbitrary names** (anything else): falls back to a generic skeleton
+ *      stub at the right architectural location. Backwards-compatible with
+ *      prior behavior.
+ */
 export async function addMiddlewareCommand(name: string, options: AddMiddlewareOptions): Promise<void> {
   const projectRoot = await findProjectRoot();
   if (!projectRoot) {
@@ -174,6 +195,12 @@ export async function addMiddlewareCommand(name: string, options: AddMiddlewareO
   }
 
   const config = await loadConfig(projectRoot);
+  const middlewareName = name.toLowerCase();
+
+  if (SUPPORTED_MIDDLEWARE_KINDS.includes(middlewareName as MiddlewareKind)) {
+    await addProductionMiddleware(projectRoot, config, middlewareName as MiddlewareKind, options);
+    return;
+  }
 
   if (config.generation.purposeRequired && !options.purpose) {
     logger.error(
@@ -184,7 +211,6 @@ export async function addMiddlewareCommand(name: string, options: AddMiddlewareO
     return;
   }
 
-  const middlewareName = name.toLowerCase();
   const ext = config.project.language === 'typescript' ? 'ts' : 'js';
 
   const basePath = config.project.architecture === 'layered'
@@ -455,6 +481,296 @@ async function wireIntoNestAppModule(
  */
 function escapeRegExp(input: string): string {
   return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Production-grade middleware scaffold for known kinds (cors, rate-limit,
+ * helmet, request-id). Full pipeline: emit file → add deps → add env keys →
+ * splice wiring into app.ts / main.ts via AST → record history.
+ */
+async function addProductionMiddleware(
+  projectRoot: string,
+  config: PillarConfig,
+  kind: MiddlewareKind,
+  options: { dryRun?: boolean; force?: boolean; filesOnly?: boolean },
+): Promise<void> {
+  let generated;
+  try {
+    generated = new MiddlewareGenerator(config, kind).generate();
+  } catch (err) {
+    logger.error(err instanceof Error ? err.message : String(err));
+    process.exitCode = 1;
+    return;
+  }
+  const { files, dependencies, devDependencies, envKeys, wiring, importBinding, importFrom } = generated;
+
+  if (options.dryRun) {
+    logger.banner(`Dry Run — Middleware (${kind})`);
+    logger.info(`Stack: ${chalk.cyan(config.project.stack)}`);
+    logger.blank();
+    logger.info(`Files (${files.length}):`);
+    for (const f of files) {
+      const exists = await fs.pathExists(path.join(projectRoot, f.relativePath));
+      const tag = exists ? chalk.yellow('(exists)') : chalk.green('(new)');
+      console.log(`  ${chalk.dim('→')} ${f.relativePath} ${tag}`);
+      console.log(`    ${chalk.dim(f.purpose)}`);
+    }
+    const depEntries = [
+      ...Object.entries(dependencies).map(([k, v]) => `${k}@${v}`),
+      ...Object.entries(devDependencies).map(([k, v]) => `${k}@${v} (dev)`),
+    ];
+    if (depEntries.length > 0) {
+      logger.blank();
+      logger.info('Dependencies to add:');
+      logger.list(depEntries);
+    }
+    if (envKeys.length > 0) {
+      logger.blank();
+      logger.info('Env keys to add:');
+      logger.list(envKeys.map((e) => `${e.key} — ${e.comment}`));
+    }
+    if (wiring) {
+      logger.blank();
+      logger.info(`Will wire into ${wiringTargetLabel(wiring.target)}: ${chalk.cyan(wiring.statement.trim())}`);
+    } else {
+      logger.blank();
+      logger.info('No auto-wiring for this stack — the file is emitted as a helper for manual integration.');
+    }
+    return;
+  }
+
+  if (!options.force) {
+    const conflicts: string[] = [];
+    for (const f of files) {
+      if (await fs.pathExists(path.join(projectRoot, f.relativePath))) conflicts.push(f.relativePath);
+    }
+    if (conflicts.length > 0) {
+      logger.error('Files already exist:');
+      logger.list(conflicts);
+      logger.blank();
+      logger.info('Use --force to overwrite, or --dry-run to preview.');
+      process.exitCode = 1;
+      return;
+    }
+  }
+
+  const operations: FileOperation[] = [];
+
+  await withSpinner(`Scaffolding ${kind} middleware (${files.length} file${files.length === 1 ? '' : 's'})`, async () => {
+    for (const f of files) {
+      const fullPath = path.join(projectRoot, f.relativePath);
+      const exists = await fs.pathExists(fullPath);
+      const previousContent = exists ? await fs.readFile(fullPath, 'utf-8') : undefined;
+      await fs.ensureDir(path.dirname(fullPath));
+      await fs.writeFile(fullPath, f.content, 'utf-8');
+      operations.push({
+        type: exists ? 'modify' : 'create',
+        path: f.relativePath,
+        ...(previousContent !== undefined ? { previousContent } : {}),
+      });
+    }
+  });
+
+  if (config.map.autoUpdate) {
+    const mapManager = new MapManager(projectRoot);
+    for (const f of files) {
+      await mapManager.registerEntry(f.relativePath, f.purpose);
+    }
+    logger.info('Project map updated');
+  }
+
+  if (!options.filesOnly) {
+    const pkgOp = await updateMiddlewarePackageJson(projectRoot, dependencies, devDependencies);
+    if (pkgOp) operations.push(pkgOp);
+
+    if (envKeys.length > 0) {
+      const envOps = await updateMiddlewareEnvFiles(projectRoot, envKeys);
+      operations.push(...envOps);
+    }
+
+    if (wiring && importBinding && importFrom) {
+      const wireOp = await wireMiddlewareIntoApp(projectRoot, config, wiring, importBinding, importFrom);
+      if (wireOp) operations.push(wireOp);
+    }
+  }
+
+  const history = new HistoryManager(projectRoot);
+  await history.record(`add middleware ${kind}`, operations);
+
+  logger.blank();
+  logger.success(`Middleware (${kind}) scaffold generated`);
+  logger.blank();
+  logger.info('Files created:');
+  logger.list(files.map((f) => f.relativePath));
+
+  const nextSteps: string[] = [];
+  if (Object.keys(dependencies).length + Object.keys(devDependencies).length > 0) {
+    nextSteps.push(`Install deps: ${chalk.cyan('npm install')}`);
+  }
+  if (envKeys.length > 0) {
+    nextSteps.push(`Review env values in ${chalk.cyan('.env')}`);
+  }
+  if (!wiring) {
+    nextSteps.push(`Integrate manually — this stack has no auto-wiring.`);
+  }
+  if (nextSteps.length > 0) {
+    logger.blank();
+    logger.info('Next steps:');
+    logger.list(nextSteps);
+  }
+  logger.blank();
+}
+
+function wiringTargetLabel(target: MiddlewareWiring['target']): string {
+  switch (target) {
+    case 'app-module-scope':     return 'src/app.ts (module scope)';
+    case 'fastify-factory-body': return 'src/app.ts (inside the factory)';
+    case 'nest-bootstrap-body':  return 'src/main.ts (inside bootstrap)';
+  }
+}
+
+/**
+ * Add middleware deps to package.json without downgrading pinned versions.
+ * Mirrors the policy used by `addAuthCommand`.
+ */
+async function updateMiddlewarePackageJson(
+  projectRoot: string,
+  deps: Record<string, string>,
+  devDeps: Record<string, string>,
+): Promise<FileOperation | null> {
+  const pkgPath = path.join(projectRoot, 'package.json');
+  if (!(await fs.pathExists(pkgPath))) return null;
+  if (Object.keys(deps).length === 0 && Object.keys(devDeps).length === 0) return null;
+
+  const previousContent = await fs.readFile(pkgPath, 'utf-8');
+  const pkg = JSON.parse(previousContent) as {
+    dependencies?: Record<string, string>;
+    devDependencies?: Record<string, string>;
+  };
+  pkg.dependencies ??= {};
+  pkg.devDependencies ??= {};
+
+  let changed = false;
+  for (const [k, v] of Object.entries(deps)) {
+    if (!pkg.dependencies[k]) { pkg.dependencies[k] = v; changed = true; }
+  }
+  for (const [k, v] of Object.entries(devDeps)) {
+    if (!pkg.devDependencies[k]) { pkg.devDependencies[k] = v; changed = true; }
+  }
+  if (!changed) return null;
+
+  pkg.dependencies = Object.fromEntries(Object.entries(pkg.dependencies).sort());
+  pkg.devDependencies = Object.fromEntries(Object.entries(pkg.devDependencies).sort());
+
+  await fs.writeFile(pkgPath, JSON.stringify(pkg, null, 2) + '\n', 'utf-8');
+  return { type: 'modify', path: 'package.json', previousContent };
+}
+
+async function updateMiddlewareEnvFiles(
+  projectRoot: string,
+  keys: Array<{ key: string; defaultValue: string; comment: string }>,
+): Promise<FileOperation[]> {
+  const ops: FileOperation[] = [];
+  const examplePath = path.join(projectRoot, '.env.example');
+  const envPath = path.join(projectRoot, '.env');
+
+  const examplePrev = (await fs.pathExists(examplePath)) ? await fs.readFile(examplePath, 'utf-8') : null;
+  const envPrev = (await fs.pathExists(envPath)) ? await fs.readFile(envPath, 'utf-8') : null;
+
+  const manager = new EnvManager(projectRoot);
+  for (const { key, defaultValue, comment } of keys) {
+    await manager.addVariable(key, { defaultValue, comment, required: false });
+  }
+
+  const exampleNow = (await fs.pathExists(examplePath)) ? await fs.readFile(examplePath, 'utf-8') : null;
+  const envNow = (await fs.pathExists(envPath)) ? await fs.readFile(envPath, 'utf-8') : null;
+
+  if (exampleNow !== examplePrev) {
+    ops.push({
+      type: examplePrev === null ? 'create' : 'modify',
+      path: '.env.example',
+      ...(examplePrev !== null ? { previousContent: examplePrev } : {}),
+    });
+  }
+  if (envNow !== envPrev) {
+    ops.push({
+      type: envPrev === null ? 'create' : 'modify',
+      path: '.env',
+      ...(envPrev !== null ? { previousContent: envPrev } : {}),
+    });
+  }
+  return ops;
+}
+
+/**
+ * Splice the middleware import + registration into the app entry file.
+ *
+ *   - Express / Hono : module-scope, just before the last export.
+ *   - Fastify        : inside the factory body, just before `return app;`.
+ *   - NestJS         : inside `bootstrap`, just before `await app.listen(...)`.
+ *
+ * All three paths are idempotent — running the command twice is a no-op.
+ */
+async function wireMiddlewareIntoApp(
+  projectRoot: string,
+  config: PillarConfig,
+  wiring: MiddlewareWiring,
+  importBinding: string,
+  importFrom: string,
+): Promise<FileOperation | null> {
+  const stack = config.project.stack;
+  const entryRel = stack === 'nestjs' ? 'src/main.ts' : 'src/app.ts';
+  const entryAbs = path.join(projectRoot, entryRel);
+  if (!(await fs.pathExists(entryAbs))) return null;
+
+  const previousContent = await fs.readFile(entryAbs, 'utf-8');
+  let updated = ensureNamedImport(previousContent, importFrom, importBinding);
+
+  switch (wiring.target) {
+    case 'app-module-scope':
+      if (!containsStatement(updated, wiring.statement)) {
+        updated = addModuleStatement(updated, wiring.statement, { beforeLastExport: true });
+      }
+      break;
+
+    case 'fastify-factory-body': {
+      if (!containsStatement(updated, wiring.statement)) {
+        const returnMatch = updated.match(/^\s*return\s+(?:app|fastify)\s*;?\s*$/m);
+        if (returnMatch && returnMatch.index !== undefined) {
+          updated = updated.slice(0, returnMatch.index) + wiring.statement + '\n' + updated.slice(returnMatch.index);
+        } else {
+          // Fallback: append at module scope (user's factory shape is non-standard).
+          updated = addModuleStatement(updated, wiring.statement);
+        }
+      }
+      break;
+    }
+
+    case 'nest-bootstrap-body': {
+      if (!containsStatement(updated, wiring.statement)) {
+        const listenMatch = updated.match(/^[ \t]*(?:await\s+)?app\.listen\s*\(/m);
+        if (listenMatch && listenMatch.index !== undefined) {
+          const indent = (listenMatch[0].match(/^[ \t]*/) ?? [''])[0];
+          updated = updated.slice(0, listenMatch.index) + indent + wiring.statement + '\n' + updated.slice(listenMatch.index);
+        } else {
+          updated = addModuleStatement(updated, wiring.statement);
+        }
+      }
+      break;
+    }
+  }
+
+  if (updated === previousContent) return null;
+
+  await fs.writeFile(entryAbs, updated, 'utf-8');
+  return { type: 'modify', path: entryRel, previousContent };
+}
+
+/** Cheap "already wired?" check — compares trimmed source line presence. */
+function containsStatement(source: string, statement: string): boolean {
+  const trimmed = statement.trim();
+  if (trimmed.length === 0) return true;
+  return source.includes(trimmed);
 }
 
 /**
