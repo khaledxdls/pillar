@@ -447,7 +447,23 @@ pillar ai "add rate limiting" --print-plan
 
 # Use a specific provider/model
 pillar ai "add auth middleware" --provider anthropic --model claude-sonnet-4-6
+
+# Last run's plan didn't type-check? Replay it with tsc errors as feedback
+pillar ai --retry --yes
 ```
+
+### Retry with type-checker feedback
+
+Every successful `pillar ai` run writes a snapshot to `.pillar/ai-last.json` (request, provider, model, affected files, timestamp). Running `pillar ai --retry` replays that request — but first runs `tsc --noEmit`, captures the errors (capped at 60 lines / 8KB), and appends them to the prompt. The model sees both the original intent and the concrete failures it needs to fix.
+
+Typical flow:
+
+```bash
+pillar ai "add a search method to products"    # AI generates, but tsc fails
+pillar ai --retry --yes                        # auto-fix with tsc feedback
+```
+
+Falls back with a clear message when there's no snapshot, no `tsconfig.json`, or tsc reports no errors.
 
 How it works:
 
@@ -472,6 +488,7 @@ Options:
 | `--dry-run` | Show the plan and diff without writing files |
 | `-y, --yes` | Skip the confirm prompt — apply the plan immediately |
 | `--print-plan` | Print the raw JSON plan returned by the model (debugging) |
+| `--retry` | Replay the last AI request with `tsc --noEmit` errors fed back as extra context |
 
 ---
 

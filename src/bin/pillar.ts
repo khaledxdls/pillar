@@ -158,14 +158,15 @@ program
 
 // --- pillar ai ---
 program
-  .command('ai <request>')
+  .command('ai [request]')
   .description('AI-powered feature generation using the project map for context')
   .option('--provider <name>', 'AI provider: openai or anthropic')
   .option('--model <name>', 'Model name override')
   .option('--dry-run', 'Show the plan without executing')
   .option('-y, --yes', 'Skip the confirmation prompt (non-interactive)')
   .option('--print-plan', 'Print the raw plan JSON before applying')
-  .action(async (request: string, options: { provider?: string; model?: string; dryRun?: boolean; yes?: boolean; printPlan?: boolean }) => {
+  .option('--retry', 'Re-run the last AI request with tsc errors fed back as extra context')
+  .action(async (request: string | undefined, options: { provider?: string; model?: string; dryRun?: boolean; yes?: boolean; printPlan?: boolean; retry?: boolean }) => {
     const { aiCommand } = await import('../commands/ai.js');
     await aiCommand(request, options);
   });

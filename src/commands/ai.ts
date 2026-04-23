@@ -1,3 +1,6 @@
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import fs from 'fs-extra';
 import chalk from 'chalk';
 import { loadConfig } from '../core/config/index.js';
 import { MapManager } from '../core/map/index.js';
@@ -22,9 +25,24 @@ interface AIOptions {
   dryRun?: boolean;
   yes?: boolean;
   printPlan?: boolean;
+  retry?: boolean;
 }
 
-export async function aiCommand(request: string, options: AIOptions): Promise<void> {
+const LAST_RUN_PATH = '.pillar/ai-last.json';
+const MAX_ERROR_BYTES = 8 * 1024;
+const MAX_ERROR_LINES = 60;
+
+interface LastRunSnapshot {
+  request: string;
+  provider: 'openai' | 'anthropic';
+  model: string;
+  summary: string;
+  createdFiles: string[];
+  modifiedFiles: string[];
+  timestamp: string;
+}
+
+export async function aiCommand(request: string | undefined, options: AIOptions): Promise<void> {
   const projectRoot = await findProjectRoot();
   if (!projectRoot) {
     logger.error('Not inside a Pillar project.', 'Run "pillar init" first.');
@@ -35,6 +53,46 @@ export async function aiCommand(request: string, options: AIOptions): Promise<vo
   const config = await loadConfig(projectRoot);
   const mapManager = new MapManager(projectRoot);
   const map = await mapManager.load();
+
+  // Retry path: replay the last request augmented with typecheck errors.
+  // Request arg is optional when --retry is used; the saved snapshot carries it.
+  let effectiveRequest: string;
+  let retryContext: string | null = null;
+  if (options.retry) {
+    const snapshot = await loadLastRun(projectRoot);
+    if (!snapshot) {
+      logger.error('No previous `pillar ai` run to retry.', `Expected snapshot at ${LAST_RUN_PATH}.`);
+      process.exitCode = 1;
+      return;
+    }
+    logger.info(`Retrying: ${chalk.dim(snapshot.request)}`);
+    logger.info(`Previous run: ${snapshot.provider}/${snapshot.model} at ${snapshot.timestamp}`);
+
+    const errors = await withSpinner('Running tsc --noEmit to collect errors', async () =>
+      collectTypecheckErrors(projectRoot),
+    );
+
+    if (errors.kind === 'no-tsconfig') {
+      logger.info('No tsconfig.json — retry needs a TypeScript project to collect errors.');
+      process.exitCode = 1;
+      return;
+    }
+    if (errors.kind === 'clean') {
+      logger.success('tsc reports no errors — nothing to retry against.');
+      return;
+    }
+
+    logger.info(`Captured ${errors.lineCount} tsc error line(s) (${errors.bytes} bytes) to feed back to the model.`);
+    retryContext = errors.text;
+    effectiveRequest = snapshot.request;
+  } else {
+    if (!request || request.trim().length === 0) {
+      logger.error('Missing request.', 'Usage: pillar ai "<what to generate>" — or pass --retry to replay the last run.');
+      process.exitCode = 1;
+      return;
+    }
+    effectiveRequest = request;
+  }
 
   const providerConfig = resolveProvider(options);
   if (!providerConfig) {
@@ -48,16 +106,30 @@ export async function aiCommand(request: string, options: AIOptions): Promise<vo
     logger.blank();
     logger.info('Then run:');
     logger.list([
-      `pillar ai "${request}"`,
-      `pillar ai "${request}" --provider openai --model gpt-4o`,
-      `pillar ai "${request}" --provider anthropic --model claude-sonnet-4-6`,
+      `pillar ai "${effectiveRequest}"`,
+      `pillar ai "${effectiveRequest}" --provider openai --model gpt-4o`,
+      `pillar ai "${effectiveRequest}" --provider anthropic --model claude-sonnet-4-6`,
     ]);
     process.exitCode = 1;
     return;
   }
 
   const context = buildContext(config, map);
-  const userPrompt = buildPrompt(context, request);
+  // On retry, append the tsc errors to the user request so they land in
+  // pass-1 (plan) and flow naturally into pass-2 (file-enriched). The
+  // model sees the original intent AND the concrete failures it needs
+  // to fix — no prose prefix needed since buildPrompt() already frames it.
+  const augmentedRequest = retryContext
+    ? [
+        effectiveRequest,
+        '',
+        'The previous plan for this request was applied, but `tsc --noEmit` now reports these errors. Emit a NEW plan that modifies the failing files to fix them. Do NOT recreate files that already exist — use modify actions. Match identifiers exactly as they appear in the files.',
+        '',
+        '--- tsc --noEmit ---',
+        retryContext,
+      ].join('\n')
+    : effectiveRequest;
+  const userPrompt = buildPrompt(context, augmentedRequest);
   const systemPrompt = getSystemPrompt();
 
   const promptChars = systemPrompt.length + userPrompt.length;
@@ -186,7 +258,21 @@ export async function aiCommand(request: string, options: AIOptions): Promise<vo
   // creating a no-op undo entry the user can't usefully revert.
   if (result.operations.length > 0) {
     const history = new HistoryManager(projectRoot);
-    await history.record(`ai "${request}" (${providerConfig.provider}/${providerConfig.model})`, result.operations);
+    const label = options.retry ? `ai --retry "${effectiveRequest}"` : `ai "${effectiveRequest}"`;
+    await history.record(`${label} (${providerConfig.provider}/${providerConfig.model})`, result.operations);
+
+    // Persist snapshot for future `--retry` invocations. We always write
+    // the ORIGINAL request (not the augmented retry prompt) so repeated
+    // retries keep the operator's real intent, not a prompt-chain drift.
+    await saveLastRun(projectRoot, {
+      request: effectiveRequest,
+      provider: providerConfig.provider,
+      model: providerConfig.model,
+      summary: plan.summary,
+      createdFiles: result.createdFiles,
+      modifiedFiles: result.modifiedFiles,
+      timestamp: new Date().toISOString(),
+    });
   }
 
   logger.blank();
@@ -225,6 +311,92 @@ function reportWarnings(warnings: ExecutionWarning[]): void {
     const label = labels[w.reason] ?? w.reason;
     console.log(`    ${chalk.yellow('!')} ${w.path} — ${label}`);
   }
+}
+
+async function loadLastRun(projectRoot: string): Promise<LastRunSnapshot | null> {
+  const p = path.join(projectRoot, LAST_RUN_PATH);
+  if (!(await fs.pathExists(p))) return null;
+  try {
+    const raw = await fs.readFile(p, 'utf-8');
+    const parsed = JSON.parse(raw) as unknown;
+    if (!isSnapshot(parsed)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function isSnapshot(v: unknown): v is LastRunSnapshot {
+  if (typeof v !== 'object' || v === null) return false;
+  const s = v as Record<string, unknown>;
+  return typeof s['request'] === 'string'
+    && typeof s['model'] === 'string'
+    && (s['provider'] === 'openai' || s['provider'] === 'anthropic')
+    && typeof s['timestamp'] === 'string';
+}
+
+async function saveLastRun(projectRoot: string, snap: LastRunSnapshot): Promise<void> {
+  const p = path.join(projectRoot, LAST_RUN_PATH);
+  await fs.ensureDir(path.dirname(p));
+  await fs.writeFile(p, JSON.stringify(snap, null, 2) + '\n', 'utf-8');
+}
+
+/**
+ * Collect `tsc --noEmit` errors for retry feedback. Uses the project's
+ * local tsc (node_modules/.bin) when present, falling back to `npx tsc`
+ * otherwise. Output is filtered to `error TS` lines, capped at
+ * MAX_ERROR_LINES and MAX_ERROR_BYTES so a catastrophic breakage can't
+ * blow the prompt budget.
+ */
+type TypecheckResult =
+  | { kind: 'no-tsconfig' }
+  | { kind: 'clean' }
+  | { kind: 'errors'; text: string; lineCount: number; bytes: number };
+
+async function collectTypecheckErrors(projectRoot: string): Promise<TypecheckResult> {
+  if (!(await fs.pathExists(path.join(projectRoot, 'tsconfig.json')))) {
+    return { kind: 'no-tsconfig' };
+  }
+
+  const localTsc = path.join(projectRoot, 'node_modules', '.bin', 'tsc');
+  const hasLocal = await fs.pathExists(localTsc);
+  const cmd = hasLocal ? localTsc : 'npx';
+  const args = hasLocal
+    ? ['--noEmit', '--pretty', 'false']
+    : ['--yes', 'tsc', '--noEmit', '--pretty', 'false'];
+
+  const out = await new Promise<string>((resolve) => {
+    const child = spawn(cmd, args, { cwd: projectRoot, stdio: ['ignore', 'pipe', 'pipe'] });
+    let buf = '';
+    const onData = (b: Buffer): void => { buf += b.toString('utf-8'); };
+    child.stdout?.on('data', onData);
+    child.stderr?.on('data', onData);
+    // 2-minute ceiling — tsc on a scaffolded project is fast, but we'd
+    // rather abandon than hang the CLI.
+    const timer = setTimeout(() => child.kill('SIGKILL'), 120_000);
+    child.on('exit', () => { clearTimeout(timer); resolve(buf); });
+  });
+
+  const errorLines = out
+    .split('\n')
+    .filter((l) => /error TS\d+/.test(l));
+
+  if (errorLines.length === 0) return { kind: 'clean' };
+
+  // Trim in two dimensions: line count and byte budget. Byte cap wins —
+  // if a single line is pathologically long it still gets truncated.
+  const trimmedLines = errorLines.slice(0, MAX_ERROR_LINES);
+  let text = trimmedLines.join('\n');
+  if (Buffer.byteLength(text, 'utf-8') > MAX_ERROR_BYTES) {
+    text = text.slice(0, MAX_ERROR_BYTES) + '\n… (truncated)';
+  }
+
+  return {
+    kind: 'errors',
+    text,
+    lineCount: errorLines.length,
+    bytes: Buffer.byteLength(text, 'utf-8'),
+  };
 }
 
 function resolveProvider(options: AIOptions): AIProviderConfig | null {
