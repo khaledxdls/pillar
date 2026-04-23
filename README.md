@@ -439,27 +439,39 @@ pillar ai "add a search endpoint to product that filters by name and price range
 # Preview the plan without applying
 pillar ai "add pagination to all list endpoints" --dry-run
 
+# Skip the confirm prompt (useful in scripts and CI)
+pillar ai "wire health route into the app" --yes
+
+# Dump the raw JSON plan the model returned (debugging)
+pillar ai "add rate limiting" --print-plan
+
 # Use a specific provider/model
-pillar ai "add auth middleware" --provider anthropic --model claude-sonnet-4-20250514
+pillar ai "add auth middleware" --provider anthropic --model claude-sonnet-4-6
 ```
 
 How it works:
 
-1. **Pass 1**: Sends the project map (~500 tokens) + your request to the AI
-2. **Pass 2**: Reads the actual files that need modification, sends enriched context for a refined plan
-3. **Preview**: Shows a unified diff of all planned changes
-4. **Confirm**: You approve or reject before any files are modified
-5. **Execute**: Creates/modifies files, updates the project map, records history
+1. **Pass 1**: Sends the project map (~500 tokens, capped at 200 entries) + your request to the AI
+2. **Pass 2**: Reads the actual files that need modification (32 KB byte budget) and sends enriched context for a refined plan
+3. **Preview**: Shows a unified diff and any structured warnings (`skip-existing`, `skip-missing`, `outside-root`, `noop-modify`)
+4. **Confirm**: You approve or reject before any files are modified (or pass `--yes` to skip)
+5. **Execute**: Creates/modifies files, updates the project map, records history for `pillar undo`
 
-The AI understands your project's stack, architecture, and existing structure. It modifies controllers, services, repositories, and routes with proper patterns for your chosen framework.
+The AI understands your project's stack, architecture, and existing structure. It defers full CRUD scaffolding to the CLI (`pillar add resource`, `pillar add middleware`, `pillar add auth`) — the model is reserved for custom logic, integrations, and refactors. This keeps prompts under ~500 tokens of context.
+
+**Safety:** the response is validated against a strict Zod schema before any file touches disk. Plan size, file count, content bytes, and path safety (no absolute paths, no `..`, no URL schemes, no NUL bytes) are all enforced. On schema-validation failure the model gets one chance to self-correct with the exact errors. Transient HTTP failures (timeouts, 429, 5xx) retry with exponential backoff and honor `Retry-After`.
+
+**Token reporting:** real billed tokens are read from the provider's `usage` block (not estimated) and surfaced as `Provider usage: <N> tokens across <P> pass(es) — <provider>/<model>`.
 
 Options:
 
 | Flag | Description |
 |------|-------------|
-| `--provider <name>` | `openai` or `anthropic` |
-| `--model <name>` | Model name override (e.g., `gpt-4o`, `claude-sonnet-4-20250514`) |
-| `--dry-run` | Show the plan and diff without executing |
+| `--provider <name>` | `openai` or `anthropic` (auto-detected from env if omitted) |
+| `--model <name>` | Model override — defaults: `gpt-4o` (OpenAI), `claude-sonnet-4-6` (Anthropic) |
+| `--dry-run` | Show the plan and diff without writing files |
+| `-y, --yes` | Skip the confirm prompt — apply the plan immediately |
+| `--print-plan` | Print the raw JSON plan returned by the model (debugging) |
 
 ---
 
