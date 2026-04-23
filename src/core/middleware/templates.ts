@@ -10,13 +10,14 @@ import type { Stack } from '../../utils/constants.js';
  * import suffixes to stay compatible with Node16 module resolution.
  */
 
-export type MiddlewareKind = 'cors' | 'rate-limit' | 'helmet' | 'request-id';
+export type MiddlewareKind = 'cors' | 'rate-limit' | 'helmet' | 'request-id' | 'logging';
 
 export const SUPPORTED_MIDDLEWARE_KINDS: readonly MiddlewareKind[] = [
   'cors',
   'rate-limit',
   'helmet',
   'request-id',
+  'logging',
 ] as const;
 
 export interface MiddlewareEnvKey {
@@ -69,6 +70,7 @@ export function buildMiddleware(
     case 'rate-limit':   return rateLimitEmission(config);
     case 'helmet':       return helmetEmission(config);
     case 'request-id':   return requestIdEmission(config);
+    case 'logging':      return loggingEmission(config);
   }
 }
 
@@ -753,6 +755,290 @@ export function resolveRequestId(req: Request): string {
 }
 
 export const REQUEST_ID_HEADER = '${REQUEST_ID_HEADER}';
+`;
+}
+
+// ---------------------------------------------------------------------------
+// logging
+// ---------------------------------------------------------------------------
+
+const LOG_ENV_KEYS: MiddlewareEnvKey[] = [
+  {
+    key: 'LOG_LEVEL',
+    defaultValue: 'info',
+    comment: 'Pino log level — one of: fatal, error, warn, info, debug, trace, silent.',
+  },
+];
+
+function loggingEmission(config: PillarConfig): MiddlewareEmission {
+  const stack = config.project.stack;
+
+  if (stack === 'express' || stack === 'nestjs') {
+    return {
+      source: pinoHttpLoggerSource(stack),
+      // pino-pretty stays as a regular dep so the dev transport always
+      // resolves — devDeps may not be installed in container "dev" runtimes.
+      dependencies: { pino: '^9.5.0', 'pino-http': '^10.3.0', 'pino-pretty': '^11.3.0' },
+      devDependencies: {},
+      envKeys: LOG_ENV_KEYS,
+      wiring: stack === 'express'
+        ? { importBinding: 'requestLogger', statement: `app.use(requestLogger());`, target: 'app-module-scope' }
+        : { importBinding: 'requestLogger', statement: `app.use(requestLogger());`, target: 'nest-bootstrap-body' },
+    };
+  }
+
+  if (stack === 'fastify') {
+    return {
+      // Fastify ships pino transitively, but we still pin pino + pino-pretty
+      // explicitly so the version we type-check against matches what runs.
+      source: fastifyLoggerSource(),
+      dependencies: { pino: '^9.5.0', 'pino-pretty': '^11.3.0' },
+      devDependencies: {},
+      envKeys: LOG_ENV_KEYS,
+      wiring: {
+        importBinding: 'registerRequestLogger',
+        statement: `  await registerRequestLogger(app);`,
+        target: 'fastify-factory-body',
+      },
+    };
+  }
+
+  if (stack === 'hono') {
+    return {
+      source: honoLoggerSource(),
+      dependencies: { pino: '^9.5.0', 'pino-pretty': '^11.3.0' },
+      devDependencies: {},
+      envKeys: LOG_ENV_KEYS,
+      wiring: {
+        importBinding: 'requestLogger',
+        statement: `app.use('*', requestLogger);`,
+        target: 'app-module-scope',
+      },
+    };
+  }
+
+  // Next.js — emit a runtime-agnostic logger (works in node + edge). Pino
+  // pulls in worker_threads, which the edge runtime forbids, so we ship a
+  // tiny structured logger instead.
+  return {
+    source: nextLoggerSource(),
+    dependencies: {},
+    devDependencies: {},
+    envKeys: LOG_ENV_KEYS,
+    wiring: null,
+  };
+}
+
+function pinoHttpLoggerSource(stack: Stack): string {
+  const noteForNest = stack === 'nestjs'
+    ? '// Wired into Nest via main.ts `app.use(requestLogger())`. Replace with nestjs-pino if you need DI-aware logging.\n'
+    : '';
+  return `// Purpose: Structured HTTP request logging via pino — honors LOG_LEVEL env, redacts secrets.
+${noteForNest}
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { randomUUID } from 'node:crypto';
+import pino from 'pino';
+import { pinoHttp } from 'pino-http';
+
+const isProd = process.env['NODE_ENV'] === 'production';
+
+export const logger = pino({
+  level: process.env['LOG_LEVEL'] ?? 'info',
+  // Never log raw secrets — these paths are inspected on every record.
+  redact: {
+    paths: [
+      'req.headers.authorization',
+      'req.headers.cookie',
+      'req.body.password',
+      'req.body.passwordHash',
+      'req.body.token',
+    ],
+    censor: '[REDACTED]',
+  },
+  ...(isProd
+    ? {}
+    : { transport: { target: 'pino-pretty', options: { colorize: true, singleLine: true, translateTime: 'SYS:HH:MM:ss.l' } } }),
+});
+
+export function requestLogger() {
+  return pinoHttp({
+    logger,
+    customLogLevel: (_req: IncomingMessage, res: ServerResponse, err?: Error) => {
+      if (err || res.statusCode >= 500) return 'error';
+      if (res.statusCode >= 400) return 'warn';
+      return 'info';
+    },
+    customSuccessMessage: (req: IncomingMessage, res: ServerResponse) =>
+      \`\${req.method ?? '?'} \${req.url ?? '?'} \${res.statusCode}\`,
+    customErrorMessage:   (req: IncomingMessage, res: ServerResponse) =>
+      \`\${req.method ?? '?'} \${req.url ?? '?'} \${res.statusCode} (error)\`,
+    // Reuse the correlation id from the request-id middleware when present;
+    // otherwise mint a fresh UUID so every record carries a reqId.
+    genReqId: (req: IncomingMessage) => {
+      const existing = (req as IncomingMessage & { id?: string }).id;
+      return existing && existing.length > 0 ? existing : randomUUID();
+    },
+  });
+}
+`;
+}
+
+function fastifyLoggerSource(): string {
+  return `// Purpose: Structured request logging for Fastify — honors LOG_LEVEL env, redacts secrets.
+//
+// Fastify already ships a pino logger; this hook adds per-request timing
+// and structured fields beyond Fastify's default request/response lines.
+// To switch Fastify's *own* logger to use the same pino config, pass
+// \`{ logger: loggerOptions }\` to the \`Fastify(...)\` factory call.
+
+import type { FastifyInstance, FastifyServerOptions } from 'fastify';
+import pino from 'pino';
+
+const isProd = process.env['NODE_ENV'] === 'production';
+
+export const loggerOptions: FastifyServerOptions['logger'] = {
+  level: process.env['LOG_LEVEL'] ?? 'info',
+  redact: ['req.headers.authorization', 'req.headers.cookie'],
+  ...(isProd
+    ? {}
+    : { transport: { target: 'pino-pretty', options: { colorize: true, singleLine: true } } }),
+};
+
+export const logger = pino(loggerOptions as pino.LoggerOptions);
+
+export async function registerRequestLogger(app: FastifyInstance): Promise<void> {
+  app.addHook('onRequest', async (req) => {
+    (req as typeof req & { _startedAt?: number })._startedAt = Date.now();
+  });
+
+  app.addHook('onResponse', async (req, res) => {
+    const startedAt = (req as typeof req & { _startedAt?: number })._startedAt ?? Date.now();
+    const durationMs = Date.now() - startedAt;
+    const reqId = (req as typeof req & { id?: string }).id;
+
+    const level: 'info' | 'warn' | 'error' =
+      res.statusCode >= 500 ? 'error' : res.statusCode >= 400 ? 'warn' : 'info';
+
+    logger[level](
+      {
+        method: req.method,
+        url: req.url,
+        status: res.statusCode,
+        durationMs,
+        ...(reqId ? { reqId } : {}),
+      },
+      \`\${req.method} \${req.url} \${res.statusCode}\`,
+    );
+  });
+}
+`;
+}
+
+function honoLoggerSource(): string {
+  return `// Purpose: Structured HTTP request logging for Hono via pino — honors LOG_LEVEL env.
+
+import type { Context, Next } from 'hono';
+import pino from 'pino';
+
+const isProd = process.env['NODE_ENV'] === 'production';
+
+export const logger = pino({
+  level: process.env['LOG_LEVEL'] ?? 'info',
+  redact: {
+    paths: ['headers.authorization', 'headers.cookie'],
+    censor: '[REDACTED]',
+  },
+  ...(isProd
+    ? {}
+    : { transport: { target: 'pino-pretty', options: { colorize: true, singleLine: true } } }),
+});
+
+export async function requestLogger(c: Context, next: Next): Promise<void> {
+  const startedAt = Date.now();
+  let thrown: unknown;
+  try {
+    await next();
+  } catch (err) {
+    thrown = err;
+    throw err;
+  } finally {
+    const status = c.res.status;
+    const durationMs = Date.now() - startedAt;
+    const reqId = c.get('requestId') as string | undefined;
+    const level: 'info' | 'warn' | 'error' =
+      thrown || status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info';
+
+    logger[level](
+      {
+        method: c.req.method,
+        path: c.req.path,
+        status,
+        durationMs,
+        ...(reqId ? { reqId } : {}),
+        ...(thrown instanceof Error ? { err: { message: thrown.message, name: thrown.name } } : {}),
+      },
+      \`\${c.req.method} \${c.req.path} \${status}\`,
+    );
+  }
+}
+`;
+}
+
+function nextLoggerSource(): string {
+  return `// Purpose: Edge-runtime-compatible structured logger for Next.js — honors LOG_LEVEL env.
+//
+// Pino isn't safe to use in the edge runtime (it pulls in worker_threads),
+// so this is a small JSON-line logger that runs identically in node and edge.
+// Swap in pino directly inside server-only modules if you need transports.
+
+type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+const ORDER: Record<LogLevel, number> = { debug: 0, info: 1, warn: 2, error: 3 };
+
+function resolveMinLevel(): number {
+  const raw = (process.env['LOG_LEVEL'] ?? 'info').toLowerCase() as LogLevel;
+  return ORDER[raw] ?? ORDER.info;
+}
+
+function emit(level: LogLevel, msg: string, fields: Record<string, unknown>): void {
+  if (ORDER[level] < resolveMinLevel()) return;
+  const entry = { time: new Date().toISOString(), level, msg, ...fields };
+  const line = JSON.stringify(entry);
+  if (level === 'error') {
+    // eslint-disable-next-line no-console
+    console.error(line);
+  } else if (level === 'warn') {
+    // eslint-disable-next-line no-console
+    console.warn(line);
+  } else {
+    // eslint-disable-next-line no-console
+    console.log(line);
+  }
+}
+
+export const logger = {
+  debug: (msg: string, fields: Record<string, unknown> = {}): void => emit('debug', msg, fields),
+  info:  (msg: string, fields: Record<string, unknown> = {}): void => emit('info',  msg, fields),
+  warn:  (msg: string, fields: Record<string, unknown> = {}): void => emit('warn',  msg, fields),
+  error: (msg: string, fields: Record<string, unknown> = {}): void => emit('error', msg, fields),
+};
+
+export function logRequest(
+  req: Request,
+  status: number,
+  durationMs: number,
+  reqId?: string,
+): void {
+  const url = new URL(req.url);
+  const level: LogLevel = status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info';
+  logger[level](\`\${req.method} \${url.pathname} \${status}\`, {
+    method: req.method,
+    path: url.pathname,
+    status,
+    durationMs,
+    ...(reqId ? { reqId } : {}),
+  });
+}
 `;
 }
 

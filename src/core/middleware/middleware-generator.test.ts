@@ -200,6 +200,82 @@ describe('MiddlewareGenerator', () => {
     });
   });
 
+  // --- logging --------------------------------------------------------------
+
+  describe('logging', () => {
+    it('contributes LOG_LEVEL on every stack', () => {
+      for (const stack of ALL_STACKS) {
+        const r = new MiddlewareGenerator(makeConfig({ stack }), 'logging').generate();
+        expect(r.envKeys.map((e) => e.key)).toEqual(['LOG_LEVEL']);
+      }
+    });
+
+    it('express + nestjs use pino + pino-http', () => {
+      for (const stack of ['express', 'nestjs'] as const) {
+        const r = new MiddlewareGenerator(makeConfig({ stack }), 'logging').generate();
+        expect(r.dependencies).toHaveProperty('pino');
+        expect(r.dependencies).toHaveProperty('pino-http');
+        expect(r.dependencies).toHaveProperty('pino-pretty');
+      }
+    });
+
+    it('fastify uses pino directly via onResponse hook (no pino-http)', () => {
+      const r = new MiddlewareGenerator(makeConfig({ stack: 'fastify' }), 'logging').generate();
+      expect(r.dependencies).toHaveProperty('pino');
+      expect(r.dependencies).toHaveProperty('pino-pretty');
+      expect(r.dependencies).not.toHaveProperty('pino-http');
+      expect(r.files[0]!.content).toContain('onResponse');
+      expect(r.wiring?.target).toBe('fastify-factory-body');
+    });
+
+    it('hono uses pino in a try/finally so failed requests still log', () => {
+      const r = new MiddlewareGenerator(makeConfig({ stack: 'hono' }), 'logging').generate();
+      expect(r.dependencies).toHaveProperty('pino');
+      const src = r.files[0]!.content;
+      expect(src).toContain("from 'hono'");
+      expect(src).toContain('finally');
+    });
+
+    it('nextjs ships an edge-runtime-compatible logger (no pino, no node:* deps)', () => {
+      const r = new MiddlewareGenerator(makeConfig({ stack: 'nextjs' }), 'logging').generate();
+      expect(r.dependencies).toEqual({});
+      expect(r.devDependencies).toEqual({});
+      const src = r.files[0]!.content;
+      expect(src).not.toContain("from 'pino'");
+      expect(src).not.toContain("from 'node:");
+      expect(src).toContain('logger');
+      expect(src).toContain('logRequest');
+    });
+
+    it('redacts authorization headers in templates that ship pino', () => {
+      for (const stack of ['express', 'nestjs', 'fastify', 'hono'] as const) {
+        const r = new MiddlewareGenerator(makeConfig({ stack }), 'logging').generate();
+        expect(r.files[0]!.content.toLowerCase()).toContain('authorization');
+      }
+    });
+
+    it('honors the correlation id set by the request-id middleware', () => {
+      // express/nestjs (pino-http) → genReqId reads req.id
+      for (const stack of ['express', 'nestjs'] as const) {
+        const r = new MiddlewareGenerator(makeConfig({ stack }), 'logging').generate();
+        expect(r.files[0]!.content).toContain('genReqId');
+      }
+      // fastify → reads req.id in the onResponse hook
+      const fastify = new MiddlewareGenerator(makeConfig({ stack: 'fastify' }), 'logging').generate();
+      expect(fastify.files[0]!.content).toContain('reqId');
+      // hono → reads c.get('requestId')
+      const hono = new MiddlewareGenerator(makeConfig({ stack: 'hono' }), 'logging').generate();
+      expect(hono.files[0]!.content).toContain("c.get('requestId')");
+    });
+
+    it('disables pino-pretty transport in production (NODE_ENV check)', () => {
+      for (const stack of ['express', 'nestjs', 'fastify', 'hono'] as const) {
+        const r = new MiddlewareGenerator(makeConfig({ stack }), 'logging').generate();
+        expect(r.files[0]!.content).toMatch(/NODE_ENV.*production/);
+      }
+    });
+  });
+
   // --- wiring import resolution --------------------------------------------
 
   describe('import resolution', () => {

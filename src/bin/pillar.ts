@@ -163,7 +163,9 @@ program
   .option('--provider <name>', 'AI provider: openai or anthropic')
   .option('--model <name>', 'Model name override')
   .option('--dry-run', 'Show the plan without executing')
-  .action(async (request: string, options: { provider?: string; model?: string; dryRun?: boolean }) => {
+  .option('-y, --yes', 'Skip the confirmation prompt (non-interactive)')
+  .option('--print-plan', 'Print the raw plan JSON before applying')
+  .action(async (request: string, options: { provider?: string; model?: string; dryRun?: boolean; yes?: boolean; printPlan?: boolean }) => {
     const { aiCommand } = await import('../commands/ai.js');
     await aiCommand(request, options);
   });

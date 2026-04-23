@@ -292,4 +292,141 @@ describe('executePlan', () => {
       expect(result.modifiedFiles).toEqual([]);
     });
   });
+
+  describe('warnings', () => {
+    it('emits skip-existing warning when create target exists', async () => {
+      const existing = path.join(tmpDir, 'src/dup.ts');
+      await fs.ensureDir(path.dirname(existing));
+      await fs.writeFile(existing, 'old', 'utf-8');
+
+      const plan: AIGenerationPlan = {
+        summary: 'x',
+        create: [{ path: 'src/dup.ts', purpose: 'p', kind: 'generic' }],
+        modify: [],
+      };
+
+      const result = await executePlan(tmpDir, CONFIG, plan);
+      expect(result.createdFiles).toEqual([]);
+      expect(result.warnings).toEqual([{ reason: 'skip-existing', path: 'src/dup.ts' }]);
+    });
+
+    it('emits skip-missing warning when modify target is absent', async () => {
+      const plan: AIGenerationPlan = {
+        summary: 'x',
+        create: [],
+        modify: [{ path: 'src/missing.ts', purpose: 'p', kind: 'service' }],
+      };
+
+      const result = await executePlan(tmpDir, CONFIG, plan);
+      expect(result.modifiedFiles).toEqual([]);
+      expect(result.warnings).toEqual([{ reason: 'skip-missing', path: 'src/missing.ts' }]);
+    });
+
+    it('emits noop-modify warning when modify action has no injection payload', async () => {
+      const target = path.join(tmpDir, 'src/app.ts');
+      await fs.ensureDir(path.dirname(target));
+      await fs.writeFile(target, 'export const app = 1;', 'utf-8');
+
+      const plan: AIGenerationPlan = {
+        summary: 'x',
+        create: [],
+        modify: [{ path: 'src/app.ts', purpose: 'add health endpoint', kind: 'generic' }],
+      };
+
+      const result = await executePlan(tmpDir, CONFIG, plan);
+      expect(result.modifiedFiles).toEqual([]);
+      expect(result.warnings).toEqual([{ reason: 'noop-modify', path: 'src/app.ts' }]);
+      // File on disk is untouched.
+      expect(await fs.readFile(target, 'utf-8')).toBe('export const app = 1;');
+    });
+
+    it('rejects paths that resolve outside the project root', async () => {
+      // The schema would normally block `..`, but the executor double-checks
+      // with `path.resolve` so a future schema bug can't cause an escape.
+      // We bypass the schema by hand-crafting an action object.
+      const plan = {
+        summary: 'x',
+        create: [{ path: 'foo/../../escape.ts', purpose: 'p', kind: 'generic' }],
+        modify: [],
+      } as unknown as AIGenerationPlan;
+
+      const result = await executePlan(tmpDir, CONFIG, plan);
+      expect(result.createdFiles).toEqual([]);
+      expect(result.warnings[0]?.reason).toBe('outside-root');
+      // And nothing was written outside the root.
+      const escapedPath = path.resolve(tmpDir, '..', 'escape.ts');
+      expect(await fs.pathExists(escapedPath)).toBe(false);
+    });
+  });
+
+  describe('multi-line import injection', () => {
+    it('inserts after the closing brace of a multi-line import', async () => {
+      const appFile = path.join(tmpDir, 'src/app.ts');
+      await fs.ensureDir(path.dirname(appFile));
+      await fs.writeFile(appFile, [
+        "import {",
+        "  json,",
+        "  urlencoded,",
+        "} from 'express';",
+        '',
+        'const app = express();',
+        '',
+        'export { app };',
+      ].join('\n'), 'utf-8');
+
+      const plan: AIGenerationPlan = {
+        summary: 'x',
+        create: [],
+        modify: [{
+          path: 'src/app.ts',
+          purpose: 'p',
+          kind: 'generic',
+          imports: ["import { healthRouter } from './health.routes.js';"],
+        }],
+      };
+
+      await executePlan(tmpDir, CONFIG, plan);
+      const content = await fs.readFile(appFile, 'utf-8');
+      const lines = content.split('\n');
+      // Closing `}` of multi-line import is line index 3; the new import
+      // should land at index 4, i.e. immediately after the multi-line block,
+      // before the blank line.
+      expect(lines[4]).toBe("import { healthRouter } from './health.routes.js';");
+      // Sanity: original code intact below.
+      expect(content).toContain('const app = express();');
+    });
+
+    it('skips comment-only and blank lines between imports without truncating the search', async () => {
+      const appFile = path.join(tmpDir, 'src/app.ts');
+      await fs.ensureDir(path.dirname(appFile));
+      await fs.writeFile(appFile, [
+        "import a from 'a';",
+        '',
+        '// section break',
+        "import b from 'b';",
+        '',
+        'const app = {};',
+      ].join('\n'), 'utf-8');
+
+      const plan: AIGenerationPlan = {
+        summary: 'x',
+        create: [],
+        modify: [{
+          path: 'src/app.ts',
+          purpose: 'p',
+          kind: 'generic',
+          imports: ["import c from 'c';"],
+        }],
+      };
+
+      await executePlan(tmpDir, CONFIG, plan);
+      const content = await fs.readFile(appFile, 'utf-8');
+      // The new import must appear after `import b from 'b';`, not after `import a`.
+      const idxC = content.indexOf("import c");
+      const idxB = content.indexOf("import b");
+      const idxApp = content.indexOf('const app');
+      expect(idxC).toBeGreaterThan(idxB);
+      expect(idxC).toBeLessThan(idxApp);
+    });
+  });
 });

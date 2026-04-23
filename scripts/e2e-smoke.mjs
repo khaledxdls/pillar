@@ -213,7 +213,7 @@ async function runStack(stack) {
     // 3c. pillar add middleware — exercise every supported kind so that all
     //     four stack-specific templates (and their wiring paths) compile.
     //     Runs one aggregate install afterwards for any new runtime deps.
-    const MIDDLEWARE_KINDS = ['cors', 'rate-limit', 'helmet', 'request-id'];
+    const MIDDLEWARE_KINDS = ['cors', 'rate-limit', 'helmet', 'request-id', 'logging'];
     for (const kind of MIDDLEWARE_KINDS) {
       const mwRes = await run(prefix, process.execPath, [
         pillarBin, 'add', 'middleware', kind,

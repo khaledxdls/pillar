@@ -92,6 +92,7 @@ export class MiddlewareGenerator {
       case 'rate-limit':  return 'Per-IP request rate limiting — window/max driven by RATE_LIMIT_* env.';
       case 'helmet':      return 'Secure HTTP headers (CSP, HSTS, X-Frame-Options, etc.).';
       case 'request-id':  return 'Correlation-ID middleware — honors inbound x-request-id.';
+      case 'logging':     return 'Structured request logging — honors LOG_LEVEL env, redacts secrets, reuses correlation id.';
     }
   }
 }

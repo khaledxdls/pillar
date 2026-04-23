@@ -1,3 +1,5 @@
+import type { PlanFileKind } from './plan-schema.js';
+
 export interface AIGenerationPlan {
   create: AIFileAction[];
   modify: AIFileAction[];
@@ -7,7 +9,7 @@ export interface AIGenerationPlan {
 export interface AIFileAction {
   path: string;
   purpose: string;
-  kind: string;
+  kind: PlanFileKind;
   fields?: Array<{ name: string; type: string }>;
   methods?: Array<{ name: string; description: string }>;
   content?: string;
@@ -28,5 +30,6 @@ export interface AIRequestContext {
   architecture: string;
   database: string;
   orm: string;
+  testFramework: string;
   mapSummary: string;
 }
