@@ -2,6 +2,8 @@ import path from 'node:path';
 import fs from 'fs-extra';
 import type { PillarConfig } from '../config/index.js';
 import type { FileOperation } from '../history/types.js';
+import { PlanBuilder, PlanExecutor } from '../plan/index.js';
+import type { Plan } from '../plan/index.js';
 import { resolveResourceFilePath } from '../../utils/resolve-resource-path.js';
 import { assertSafeResourceName } from '../../utils/sanitize.js';
 import { toPascalCase, findInterfaceBlock } from '../../utils/naming.js';
@@ -33,7 +35,37 @@ export function parseFieldDef(raw: string): FieldDefinition {
 }
 
 /**
- * Add a field to a resource's model, types, and validator files.
+ * Compute the Plan for adding fields to a resource. No filesystem writes.
+ *
+ * This is the single source of truth for what "add field" does; the write
+ * path is a thin wrapper (`addFieldToResource`) that executes this plan,
+ * and the preview path renders it directly.
+ */
+export async function planFieldExtension(
+  projectRoot: string,
+  config: PillarConfig,
+  resourceName: string,
+  fieldDefs: FieldDefinition[],
+  command: string,
+): Promise<Plan> {
+  assertSafeResourceName(resourceName);
+  const ext = config.project.language === 'typescript' ? 'ts' : 'js';
+  const arch = config.project.architecture;
+  const builder = new PlanBuilder(projectRoot, command);
+
+  if (config.project.language === 'typescript') {
+    await planInterfaceEdit(builder, projectRoot, resolveResourceFilePath(arch, resourceName, 'types', ext), resourceName, fieldDefs);
+    await planInterfaceEdit(builder, projectRoot, resolveResourceFilePath(arch, resourceName, 'model', ext), resourceName, fieldDefs);
+  }
+
+  await planValidatorEdit(builder, projectRoot, resolveResourceFilePath(arch, resourceName, 'validator', ext), resourceName, fieldDefs);
+
+  return builder.build();
+}
+
+/**
+ * Apply fields to a resource. Plan-first internally so both the write
+ * path and `--preview` share one transform pipeline.
  */
 export async function addFieldToResource(
   projectRoot: string,
@@ -41,62 +73,27 @@ export async function addFieldToResource(
   resourceName: string,
   fieldDefs: FieldDefinition[],
 ): Promise<FieldExtensionResult> {
-  const ext = config.project.language === 'typescript' ? 'ts' : 'js';
-  const arch = config.project.architecture;
-  const operations: FileOperation[] = [];
-  const modifiedFiles: string[] = [];
-
-  // Add to model/types
-  const modelFile = path.join(projectRoot, resolveResourceFilePath(arch, resourceName, 'model', ext));
-  const typesFile = path.join(projectRoot, resolveResourceFilePath(arch, resourceName, 'types', ext));
-
-  if (config.project.language === 'typescript') {
-    // Update types file
-    if (await fs.pathExists(typesFile)) {
-      const result = await injectFieldsIntoInterface(typesFile, resourceName, fieldDefs);
-      if (result) {
-        operations.push(result.operation);
-        modifiedFiles.push(path.relative(projectRoot, typesFile));
-      }
-    }
-
-    // Update model file
-    if (await fs.pathExists(modelFile)) {
-      const result = await injectFieldsIntoInterface(modelFile, resourceName, fieldDefs);
-      if (result) {
-        operations.push(result.operation);
-        modifiedFiles.push(path.relative(projectRoot, modelFile));
-      }
-    }
-  }
-
-  // Update validator (Zod schema)
-  const validatorFile = path.join(projectRoot, resolveResourceFilePath(arch, resourceName, 'validator', ext));
-  if (await fs.pathExists(validatorFile)) {
-    const result = await injectFieldsIntoZodSchema(validatorFile, resourceName, fieldDefs);
-    if (result) {
-      operations.push(result.operation);
-      modifiedFiles.push(path.relative(projectRoot, validatorFile));
-    }
-  }
-
-  return { operations, modifiedFiles };
+  const plan = await planFieldExtension(projectRoot, config, resourceName, fieldDefs, `add field ${resourceName}`);
+  const { operations, touched } = await new PlanExecutor(projectRoot).execute(plan);
+  return { operations, modifiedFiles: touched };
 }
 
-async function injectFieldsIntoInterface(
-  filePath: string,
+async function planInterfaceEdit(
+  builder: PlanBuilder,
+  projectRoot: string,
+  relativePath: string,
   resourceName: string,
   fields: FieldDefinition[],
-): Promise<{ operation: FileOperation } | null> {
-  const content = await fs.readFile(filePath, 'utf-8');
-  const previousContent = content;
+): Promise<void> {
+  const full = path.join(projectRoot, relativePath);
+  if (!(await fs.pathExists(full))) return;
 
-  assertSafeResourceName(resourceName);
+  const content = await fs.readFile(full, 'utf-8');
   const pascalName = toPascalCase(resourceName);
 
-  // Primary path: AST-based. Falls back to the balanced-brace text splice
-  // if ts-morph can't locate the interface (malformed source, partial
-  // files mid-edit, etc.) so we never drop user input.
+  // Primary path: AST-based via ts-morph. Falls back to balanced-brace
+  // splicing when ts-morph can't locate the interface (malformed source,
+  // mid-edit partial files) so user input is never silently dropped.
   const astResult = addFieldsToInterface(
     content,
     pascalName,
@@ -108,7 +105,7 @@ async function injectFieldsIntoInterface(
     updated = astResult;
   } else {
     const block = findInterfaceBlock(content, pascalName);
-    if (!block) return null;
+    if (!block) return;
     const fieldLines = fields
       .map((f) => `  ${f.name}${f.optional ? '?' : ''}: ${mapToTSType(f.type)};`)
       .join('\n');
@@ -121,27 +118,21 @@ async function injectFieldsIntoInterface(
       content.slice(block.closeBrace);
   }
 
-  if (updated === content) return null;
-
-  await fs.writeFile(filePath, updated, 'utf-8');
-  return {
-    operation: {
-      type: 'modify',
-      path: filePath,
-      previousContent,
-    },
-  };
+  if (updated === content) return;
+  await builder.modify(relativePath, updated, `add fields to ${pascalName}`);
 }
 
-async function injectFieldsIntoZodSchema(
-  filePath: string,
+async function planValidatorEdit(
+  builder: PlanBuilder,
+  projectRoot: string,
+  relativePath: string,
   resourceName: string,
   fields: FieldDefinition[],
-): Promise<{ operation: FileOperation } | null> {
-  const content = await fs.readFile(filePath, 'utf-8');
-  const previousContent = content;
+): Promise<void> {
+  const full = path.join(projectRoot, relativePath);
+  if (!(await fs.pathExists(full))) return;
 
-  assertSafeResourceName(resourceName);
+  const content = await fs.readFile(full, 'utf-8');
   const pascalName = toPascalCase(resourceName);
   const schemaVar = `create${pascalName}Schema`;
 
@@ -155,16 +146,15 @@ async function injectFieldsIntoZodSchema(
   if (astResult !== null) {
     updated = astResult;
   } else {
-    // Regex fallback — only used when ts-morph cannot parse the source.
     const header = new RegExp(
       `export\\s+const\\s+${escapeForRe(schemaVar)}\\s*=\\s*z\\.object\\(\\s*\\{`,
     );
     const headerMatch = header.exec(content);
-    if (!headerMatch) return null;
+    if (!headerMatch) return;
 
     const openBrace = headerMatch.index + headerMatch[0].length - 1;
     const closeBrace = findBalancedClose(content, openBrace);
-    if (closeBrace === -1) return null;
+    if (closeBrace === -1) return;
 
     const body = content.slice(openBrace + 1, closeBrace).replace(/\s+$/, '');
     const newFields = fields
@@ -178,16 +168,8 @@ async function injectFieldsIntoZodSchema(
       content.slice(closeBrace);
   }
 
-  if (updated === content) return null;
-
-  await fs.writeFile(filePath, updated, 'utf-8');
-  return {
-    operation: {
-      type: 'modify',
-      path: filePath,
-      previousContent,
-    },
-  };
+  if (updated === content) return;
+  await builder.modify(relativePath, updated, `add fields to ${schemaVar}`);
 }
 
 function escapeForRe(s: string): string {

@@ -171,10 +171,13 @@ Options:
 | `--fields <fields>` | Field definitions (e.g., `"name:string email:string age:number"`) |
 | `--no-test` | Skip test file generation |
 | `--only <types>` | Generate specific files only (e.g., `"service,controller"`) |
-| `--dry-run` | Preview without creating |
+| `--preview` | Show a unified diff of every file the command would write — nothing touches disk |
+| `--dry-run` | Deprecated alias for `--preview` |
 | `-f, --force` | Overwrite existing files |
 
 Supported field types: `string`, `number`, `boolean`, `date`, `int`, `float`, `uuid`, `json`
+
+`--preview` is supported on `add resource`, `add field`, `add endpoint`, and `add relation`. The preview is byte-exact: the same plan is rendered as a diff and (without `--preview`) executed — what you see is what you get.
 
 Field modifiers: `optional`, `unique` (e.g., `email:string:unique`)
 
@@ -369,6 +372,75 @@ What it does:
 - Installs `husky` and `lint-staged`
 - Initializes husky
 - Configures pre-commit hook to run ESLint and Prettier on staged files
+
+---
+
+### `pillar db`
+
+Database migration commands with production-safety guards and a preview mode that prints the exact argv (and SQL diff, for Prisma) without touching the database.
+
+```bash
+pillar db generate --name add_user_role    # create a migration without applying it
+pillar db migrate  --name add_user_role    # create + apply in development
+pillar db deploy                           # apply pending migrations (production path)
+pillar db status                           # show applied vs. pending migrations
+pillar db reset   --confirm <project-name> # drop + re-apply from scratch (dev only)
+pillar db rollback                         # revert the most recent migration (ORMs that support it)
+
+# Preview any command — prints the exact argv, cwd, destructive/applies flags, and (Prisma) SQL diff
+pillar db migrate --name add_role --preview
+pillar db deploy --preview
+```
+
+**ORM support matrix** — operations return a typed `Unsupported` result (not a crash) when the ORM has no equivalent:
+
+| Operation | Prisma | Drizzle | TypeORM | Mongoose | None |
+|-----------|--------|---------|---------|----------|------|
+| `generate` | `migrate dev --create-only` | `drizzle-kit generate` | `migration:generate` | hint: migrate-mongo | hint: config |
+| `migrate`  | `migrate dev` | `drizzle-kit migrate` | `migration:run` | hint | hint |
+| `deploy`   | `migrate deploy` | `drizzle-kit migrate` | `migration:run` | hint | hint |
+| `status`   | `migrate status` | unsupported | `migration:show` | hint | hint |
+| `reset`    | `migrate reset --force` | unsupported | custom (drop + run) | hint | hint |
+| `rollback` | unsupported (no native) | unsupported | `migration:revert` | hint | hint |
+
+**Production safety:**
+
+- Destructive commands (`migrate`, `reset`, `rollback`) **refuse to run with `NODE_ENV=production`** unless you pass `--force-production`. `deploy` is always allowed — it's the production path by design.
+- `reset` requires an explicit confirmation token: `--confirm <project-name>`. The token must match the `project.name` in `pillar.config.json`, which catches "wrong terminal" accidents that a bare `--yes` would miss.
+- The command uses `spawn` (no shell), so there is no shell-injection surface from migration names.
+
+**Preview mode** (`--preview`):
+
+- Prints the exact argv, cwd, destructive flag, and applies-to-DB flag — nothing is executed.
+- For Prisma, also prints the SQL diff of the next migration via `prisma migrate diff --script` (best-effort — falls back silently if the shadow DB isn't configured).
+
+Options (all subcommands):
+
+| Flag | Description |
+|------|-------------|
+| `--preview` | Print the plan and exit. No DB or filesystem writes. |
+| `--name <slug>` | Migration name (required by `generate` / `migrate` on Prisma and TypeORM) |
+| `--yes` | Skip confirmation prompts where applicable |
+| `--confirm <token>` | Required for `reset` — must match `project.name` |
+| `--force-production` | Allow destructive commands with `NODE_ENV=production` |
+
+Configuration — an optional `database.migrations` block in `pillar.config.json` lets you override adapter defaults:
+
+```json
+{
+  "database": {
+    "type": "postgresql",
+    "orm": "prisma",
+    "migrations": {
+      "directory": "prisma/migrations",
+      "schema": "prisma/schema.prisma",
+      "autoGenerateOnFieldAdd": false
+    }
+  }
+}
+```
+
+The block is optional and backwards-compatible — projects created before `pillar db` existed continue to work with adapter defaults.
 
 ---
 
@@ -875,6 +947,7 @@ Every generation command follows these rules:
 | `pillar add middleware <kind>` | Scaffold middleware — `cors`, `rate-limit`, `helmet`, `request-id` (stack-aware + wired), or any name (generic stub) |
 | `pillar add linting` | Set up ESLint + Prettier |
 | `pillar add git-hooks` | Set up Husky + lint-staged |
+| `pillar db <op>` | Database migrations — `generate`, `migrate`, `deploy`, `status`, `reset`, `rollback` (Prisma/Drizzle/TypeORM; `--preview` everywhere) |
 | `pillar map` | View/refresh/validate the project map |
 | `pillar ai <request>` | AI-powered code generation |
 | `pillar docs generate` | Generate OpenAPI spec |

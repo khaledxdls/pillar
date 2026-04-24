@@ -2,6 +2,8 @@ import path from 'node:path';
 import fs from 'fs-extra';
 import type { PillarConfig } from '../config/index.js';
 import type { FileOperation } from '../history/types.js';
+import { PlanBuilder, PlanExecutor } from '../plan/index.js';
+import type { Plan } from '../plan/index.js';
 import { resolveResourceFilePath } from '../../utils/resolve-resource-path.js';
 import { assertSafeResourceName } from '../../utils/sanitize.js';
 import { toPascalCase, pluralizeResource } from '../../utils/naming.js';
@@ -21,34 +23,31 @@ interface RelationResult {
 }
 
 /**
- * Add a relation between two resources via AST transforms.
+ * Compute the Plan for a resource relation. No I/O writes.
  *
- * Touches three things:
- *   - source `types`/`model`: adds the forward relation field + type import
- *   - target `types`/`model`: adds the inverse relation field + type import
- *   - source `repository`: adds a stub finder method + target model import
+ * Touches:
+ *   - source `types`/`model`: forward relation field + type import
+ *   - target `types`/`model`: inverse relation field + type import
+ *   - source `repository`: stub finder method + target model type import
  *
- * Every edit is idempotent (re-running the command is safe) and is
- * recorded as a `FileOperation` so `pillar undo` can reverse it.
+ * TypeScript only — on JS projects there's no compile-time type to
+ * import, so the plan is empty by design.
  */
-export async function addRelationToResource(
+export async function planRelationExtension(
   projectRoot: string,
   config: PillarConfig,
   relation: RelationDefinition,
-): Promise<RelationResult> {
+  command: string,
+): Promise<Plan> {
   assertSafeResourceName(relation.sourceResource);
   assertSafeResourceName(relation.targetResource);
+
+  const builder = new PlanBuilder(projectRoot, command);
 
   const ext = config.project.language === 'typescript' ? 'ts' : 'js';
   const isTS = config.project.language === 'typescript';
   const arch = config.project.architecture;
-  const operations: FileOperation[] = [];
-  const modifiedFiles: string[] = [];
-
-  // Interfaces only exist in TS — relations on JS projects are a no-op by
-  // design (the repository method stub is also skipped since there's no
-  // compile-time type to import).
-  if (!isTS) return { operations, modifiedFiles };
+  if (!isTS) return builder.build();
 
   const { sourceField, sourceType, inverseField, inverseType } = deriveFieldNames(relation);
   const sourcePascal = toPascalCase(relation.sourceResource);
@@ -56,111 +55,135 @@ export async function addRelationToResource(
 
   // Forward side: source interface gains `targetField: TargetType`.
   for (const suffix of ['types', 'model'] as const) {
-    const ownerFile = path.join(projectRoot, resolveResourceFilePath(arch, relation.sourceResource, suffix, ext));
-    const peerFile = path.join(projectRoot, resolveResourceFilePath(arch, relation.targetResource, suffix, ext));
-    if (!(await fs.pathExists(ownerFile)) || !(await fs.pathExists(peerFile))) continue;
-
-    const op = await injectRelationIntoInterface(
-      ownerFile, peerFile, sourcePascal, targetPascal, sourceField, sourceType,
-    );
-    if (op) { operations.push(op); modifiedFiles.push(path.relative(projectRoot, ownerFile)); }
+    await planInterfaceRelationEdit(builder, projectRoot, {
+      ownerFile: resolveResourceFilePath(arch, relation.sourceResource, suffix, ext),
+      peerFile: resolveResourceFilePath(arch, relation.targetResource, suffix, ext),
+      ownerInterface: sourcePascal,
+      peerType: targetPascal,
+      fieldName: sourceField,
+      fieldType: sourceType,
+    });
   }
 
   // Inverse side: target interface gains `sourceField: SourceType`.
   for (const suffix of ['types', 'model'] as const) {
-    const ownerFile = path.join(projectRoot, resolveResourceFilePath(arch, relation.targetResource, suffix, ext));
-    const peerFile = path.join(projectRoot, resolveResourceFilePath(arch, relation.sourceResource, suffix, ext));
-    if (!(await fs.pathExists(ownerFile)) || !(await fs.pathExists(peerFile))) continue;
-
-    const op = await injectRelationIntoInterface(
-      ownerFile, peerFile, targetPascal, sourcePascal, inverseField, inverseType,
-    );
-    if (op) { operations.push(op); modifiedFiles.push(path.relative(projectRoot, ownerFile)); }
+    await planInterfaceRelationEdit(builder, projectRoot, {
+      ownerFile: resolveResourceFilePath(arch, relation.targetResource, suffix, ext),
+      peerFile: resolveResourceFilePath(arch, relation.sourceResource, suffix, ext),
+      ownerInterface: targetPascal,
+      peerType: sourcePascal,
+      fieldName: inverseField,
+      fieldType: inverseType,
+    });
   }
 
   // Source repository gets a stub finder (e.g., `findPosts(userId)`).
-  const repoPath = path.join(projectRoot, resolveResourceFilePath(arch, relation.sourceResource, 'repository', ext));
-  if (await fs.pathExists(repoPath)) {
-    const targetModelPath = path.join(projectRoot, resolveResourceFilePath(arch, relation.targetResource, 'model', ext));
-    const op = await injectRelationMethod(repoPath, targetModelPath, relation, sourcePascal, targetPascal);
-    if (op) { operations.push(op); modifiedFiles.push(path.relative(projectRoot, repoPath)); }
-  }
+  await planRepositoryRelationEdit(builder, projectRoot, {
+    repoFile: resolveResourceFilePath(arch, relation.sourceResource, 'repository', ext),
+    targetModelFile: resolveResourceFilePath(arch, relation.targetResource, 'model', ext),
+    sourcePascal,
+    targetPascal,
+    relation,
+  });
 
-  return { operations, modifiedFiles };
+  return builder.build();
 }
 
-/**
- * Add a typed field to an interface (and its type import) via ts-morph.
- *
- * Returns null when the interface is not found in the source — the caller
- * skips the file rather than writing a half-applied edit.
- */
-async function injectRelationIntoInterface(
-  ownerFile: string,
-  peerFile: string,
-  ownerInterfaceName: string,
-  peerTypeName: string,
-  fieldName: string,
-  fieldType: string,
-): Promise<FileOperation | null> {
-  const previousContent = await fs.readFile(ownerFile, 'utf-8');
-  const importSpec = buildRelativeImportPath(ownerFile, peerFile);
-
-  const afterImport = ensureNamedImport(previousContent, importSpec, peerTypeName, 'type');
-  const afterField = addFieldsToInterface(afterImport, ownerInterfaceName, [
-    { name: fieldName, type: fieldType, optional: true },
-  ]);
-  if (afterField === null || afterField === previousContent) return null;
-
-  await fs.writeFile(ownerFile, afterField, 'utf-8');
-  return { type: 'modify', path: ownerFile, previousContent };
-}
-
-/**
- * Append a finder method to the source repository class, plus the target
- * model type import. Idempotent on method name.
- */
-async function injectRelationMethod(
-  repoPath: string,
-  targetModelPath: string,
+export async function addRelationToResource(
+  projectRoot: string,
+  config: PillarConfig,
   relation: RelationDefinition,
-  sourcePascal: string,
-  targetPascal: string,
-): Promise<FileOperation | null> {
-  const previousContent = await fs.readFile(repoPath, 'utf-8');
+): Promise<RelationResult> {
+  const plan = await planRelationExtension(
+    projectRoot,
+    config,
+    relation,
+    `add relation ${relation.sourceResource}→${relation.targetResource} (${relation.type})`,
+  );
+  const { operations, touched } = await new PlanExecutor(projectRoot).execute(plan);
+  return { operations, modifiedFiles: touched };
+}
 
-  const methodName = relation.type === 'one-to-one'
-    ? `find${targetPascal}`
-    : `find${toPascalCase(pluralizeResource(relation.targetResource))}`;
+interface InterfaceRelationEdit {
+  ownerFile: string;
+  peerFile: string;
+  ownerInterface: string;
+  peerType: string;
+  fieldName: string;
+  fieldType: string;
+}
 
-  const returnType = relation.type === 'one-to-one'
-    ? `Promise<${targetPascal} | null>`
-    : `Promise<${targetPascal}[]>`;
+async function planInterfaceRelationEdit(
+  builder: PlanBuilder,
+  projectRoot: string,
+  edit: InterfaceRelationEdit,
+): Promise<void> {
+  const ownerFull = path.join(projectRoot, edit.ownerFile);
+  const peerFull = path.join(projectRoot, edit.peerFile);
+  if (!(await fs.pathExists(ownerFull)) || !(await fs.pathExists(peerFull))) return;
+
+  const previous = await fs.readFile(ownerFull, 'utf-8');
+  const importSpec = buildRelativeImportPath(ownerFull, peerFull);
+
+  const afterImport = ensureNamedImport(previous, importSpec, edit.peerType, 'type');
+  const afterField = addFieldsToInterface(afterImport, edit.ownerInterface, [
+    { name: edit.fieldName, type: edit.fieldType, optional: true },
+  ]);
+  if (afterField === null || afterField === previous) return;
+
+  await builder.modify(edit.ownerFile, afterField, `add relation field ${edit.fieldName} on ${edit.ownerInterface}`);
+}
+
+interface RepositoryRelationEdit {
+  repoFile: string;
+  targetModelFile: string;
+  sourcePascal: string;
+  targetPascal: string;
+  relation: RelationDefinition;
+}
+
+async function planRepositoryRelationEdit(
+  builder: PlanBuilder,
+  projectRoot: string,
+  edit: RepositoryRelationEdit,
+): Promise<void> {
+  const repoFull = path.join(projectRoot, edit.repoFile);
+  if (!(await fs.pathExists(repoFull))) return;
+
+  const previous = await fs.readFile(repoFull, 'utf-8');
+
+  const methodName = edit.relation.type === 'one-to-one'
+    ? `find${edit.targetPascal}`
+    : `find${toPascalCase(pluralizeResource(edit.relation.targetResource))}`;
+
+  const returnType = edit.relation.type === 'one-to-one'
+    ? `Promise<${edit.targetPascal} | null>`
+    : `Promise<${edit.targetPascal}[]>`;
 
   const method = [
-    `// Fetch related ${relation.targetResource}(s) for this ${relation.sourceResource}.`,
+    `// Fetch related ${edit.relation.targetResource}(s) for this ${edit.relation.sourceResource}.`,
     `async ${methodName}(id: string): ${returnType} {`,
-    `  // TODO: implement — query ${relation.targetResource}(s) by ${relation.sourceResource} id`,
+    `  // TODO: implement — query ${edit.relation.targetResource}(s) by ${edit.relation.sourceResource} id`,
     `  throw new Error('Not implemented');`,
     `}`,
   ].join('\n');
 
-  let updated = previousContent;
+  let updated = previous;
 
-  // Import the target model type if we have a file to import it from.
-  // Skipping the import is tolerable (downstream tsc will flag it) rather
-  // than aborting the whole method injection.
-  if (await fs.pathExists(targetModelPath)) {
-    const importSpec = buildRelativeImportPath(repoPath, targetModelPath);
-    updated = ensureNamedImport(updated, importSpec, targetPascal, 'type');
+  // Import the target model type if a file exists to import it from.
+  // A missing target model is tolerable (tsc will flag it) rather than
+  // aborting the whole method injection.
+  const targetModelFull = path.join(projectRoot, edit.targetModelFile);
+  if (await fs.pathExists(targetModelFull)) {
+    const importSpec = buildRelativeImportPath(repoFull, targetModelFull);
+    updated = ensureNamedImport(updated, importSpec, edit.targetPascal, 'type');
   }
 
-  const className = `${sourcePascal}Repository`;
+  const className = `${edit.sourcePascal}Repository`;
   const afterMethod = addMethodToClass(updated, className, method);
-  if (afterMethod === null || afterMethod === previousContent) return null;
+  if (afterMethod === null || afterMethod === previous) return;
 
-  await fs.writeFile(repoPath, afterMethod, 'utf-8');
-  return { type: 'modify', path: repoPath, previousContent };
+  await builder.modify(edit.repoFile, afterMethod, `add ${methodName} to ${className}`);
 }
 
 function deriveFieldNames(relation: RelationDefinition): {

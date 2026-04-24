@@ -13,6 +13,9 @@ import { resolveResourcePath, resolveResourceFilePath } from '../utils/resolve-r
 import { toPascalCase, toCamelCase, pluralizeResource } from '../utils/naming.js';
 import { addElementToDecoratorArray, addModuleStatement, ensureNamedImport } from '../core/ast/index.js';
 import { EnvManager } from '../core/env/index.js';
+import { PlanBuilder, PlanExecutor } from '../core/plan/index.js';
+import type { Plan } from '../core/plan/index.js';
+import { isPreview, printPlan, type PreviewFlags } from './_preview.js';
 import {
   MiddlewareGenerator,
   SUPPORTED_MIDDLEWARE_KINDS,
@@ -20,12 +23,22 @@ import {
   type MiddlewareWiring,
 } from '../core/middleware/index.js';
 
-interface AddResourceOptions {
+interface AddResourceOptions extends PreviewFlags {
   fields?: string;
   noTest?: boolean;
   only?: string;
-  dryRun?: boolean;
   force?: boolean;
+}
+
+/**
+ * Pure computation of the route-wiring transform for an app entry file.
+ * Returns `null` when there is nothing to wire (stack is Next.js, entry
+ * file missing, or the routes are already registered).
+ */
+interface PlannedWiring {
+  relativePath: string;
+  previousContent: string;
+  newContent: string;
 }
 
 export async function addResourceCommand(name: string, options: AddResourceOptions): Promise<void> {
@@ -82,23 +95,45 @@ export async function addResourceCommand(name: string, options: AddResourceOptio
   }
   files = transformed;
 
-  if (options.dryRun) {
-    logger.banner('Dry Run — Resource Generation');
-    logger.info(`Resource: ${chalk.cyan(resourceName)}`);
-    logger.info(`Architecture: ${chalk.cyan(config.project.architecture)}`);
-    logger.info(`Files to generate: ${chalk.cyan(String(files.length))}`);
-    logger.blank();
+  // Build a single Plan covering generated files + route wiring. The
+  // preview and execute paths share this plan, so a `--preview` diff is
+  // a byte-exact preview of what a real run will write.
+  const command = `add resource ${resourceName}`;
+  const builder = new PlanBuilder(projectRoot, command);
 
-    for (const file of files) {
+  for (const file of files) {
+    if (options.force) {
+      // Force: blow past any existing file. PlanBuilder.create promotes
+      // to modify when the target exists, so force here means "don't
+      // bail on conflicts"; the plan still renders an accurate diff.
+      await builder.create(file.relativePath, file.content, file.purpose);
+    } else {
       const exists = await fs.pathExists(path.join(projectRoot, file.relativePath));
-      const status = exists ? chalk.yellow('(exists)') : chalk.green('(new)');
-      console.log(`  ${chalk.dim('→')} ${file.relativePath} ${status}`);
-      console.log(`    ${chalk.dim(file.purpose)}`);
+      if (exists && !isPreview(options)) {
+        // Defer conflict reporting to a unified block below so we can
+        // show every conflict at once. Skip adding to the plan for now.
+        continue;
+      }
+      await builder.create(file.relativePath, file.content, file.purpose);
     }
+  }
+
+  // Route-wiring change is computed against *the current* app entry. In
+  // a preview, generated route files don't yet exist on disk, but that
+  // doesn't affect the wiring transform — it only reads the entry file.
+  const wiring = await planRouteWiring(projectRoot, config, resourceName);
+  if (wiring) {
+    await builder.modify(wiring.relativePath, wiring.newContent, `wire ${resourceName} routes`);
+  }
+
+  const plan = builder.build();
+
+  if (isPreview(options)) {
+    printPlan(plan);
     return;
   }
 
-  // Check for conflicts
+  // Non-preview path: reject up-front on conflicts unless --force was given.
   if (!options.force) {
     const conflicts: string[] = [];
     for (const file of files) {
@@ -110,36 +145,20 @@ export async function addResourceCommand(name: string, options: AddResourceOptio
       logger.error('Files already exist:');
       logger.list(conflicts);
       logger.blank();
-      logger.info('Use --force to overwrite, or --dry-run to preview.');
+      logger.info('Use --force to overwrite, or --preview to inspect the diff first.');
       process.exitCode = 1;
       return;
     }
   }
 
-  const operations: FileOperation[] = [];
+  const { operations } = await withSpinner(
+    `Generating ${resourceName} resource (${plan.changes.length} change${plan.changes.length === 1 ? '' : 's'})`,
+    async () => new PlanExecutor(projectRoot).execute(plan),
+  );
 
-  await withSpinner(`Generating ${resourceName} resource (${files.length} files)`, async () => {
-    for (const file of files) {
-      const fullPath = path.join(projectRoot, file.relativePath);
-      const exists = await fs.pathExists(fullPath);
-
-      let previousContent: string | undefined;
-      if (exists) {
-        previousContent = await fs.readFile(fullPath, 'utf-8');
-      }
-
-      await fs.ensureDir(path.dirname(fullPath));
-      await fs.writeFile(fullPath, file.content, 'utf-8');
-
-      operations.push({
-        type: exists ? 'modify' : 'create',
-        path: file.relativePath,
-        ...(previousContent !== undefined ? { previousContent } : {}),
-      });
-    }
-  });
-
-  // Register all files in the map
+  // Register new files in the project map (the map is tangential to the
+  // code-generation plan and is updated separately; map history is kept
+  // out of FileOperation because map.json already versions itself).
   if (config.map.autoUpdate) {
     const mapManager = new MapManager(projectRoot);
     for (const file of files) {
@@ -148,15 +167,7 @@ export async function addResourceCommand(name: string, options: AddResourceOptio
     logger.info('Project map updated');
   }
 
-  // Auto-wire routes into app.ts
-  const routeWireResult = await wireRouteIntoApp(projectRoot, config, resourceName);
-  if (routeWireResult) {
-    operations.push(routeWireResult.operation);
-  }
-
-  // Record history
-  const historyManager = new HistoryManager(projectRoot);
-  await historyManager.record(`add resource ${resourceName}`, operations);
+  await new HistoryManager(projectRoot).record(command, operations);
 
   logger.blank();
   logger.success(`Resource "${resourceName}" generated successfully`);
@@ -272,23 +283,32 @@ export async function addMiddlewareCommand(name: string, options: AddMiddlewareO
 }
 
 /**
- * Wire a resource's routes into the app entry file (app.ts/app.js).
- * Adds the import statement and app.use() registration.
+ * Pure computation of the route-wiring transform for an app entry file.
+ *
+ * Decides which entry file applies (Express/Hono/Fastify: `src/app.ts`,
+ * NestJS: `src/app.module.ts`, Next.js: no-op), computes the new content,
+ * and returns both old and new. Callers may apply the change via
+ * PlanBuilder/PlanExecutor or render it as part of a preview.
+ *
+ * Returns `null` when there is no wiring work to do (stack has no
+ * central router, entry file missing, or the registration is already
+ * present and idempotent).
  */
-async function wireRouteIntoApp(
+async function planRouteWiring(
   projectRoot: string,
   config: PillarConfig,
   resourceName: string,
-): Promise<{ operation: FileOperation } | null> {
+): Promise<PlannedWiring | null> {
   const ext = config.project.language === 'typescript' ? 'ts' : 'js';
   const stack = config.project.stack;
 
   if (stack === 'nextjs') return null;
   if (stack === 'nestjs') {
-    return wireIntoNestAppModule(projectRoot, config, resourceName, ext);
+    return planNestAppModuleWiring(projectRoot, config, resourceName, ext);
   }
 
-  const appPath = path.join(projectRoot, `src/app.${ext}`);
+  const appRel = `src/app.${ext}`;
+  const appPath = path.join(projectRoot, appRel);
   if (!(await fs.pathExists(appPath))) return null;
 
   const content = await fs.readFile(appPath, 'utf-8');
@@ -341,14 +361,7 @@ async function wireRouteIntoApp(
 
   if (updated === previousContent) return null;
 
-  await fs.writeFile(appPath, updated, 'utf-8');
-  return {
-    operation: {
-      type: 'modify',
-      path: `src/app.${ext}`,
-      previousContent,
-    },
-  };
+  return { relativePath: appRel, previousContent, newContent: updated };
 }
 
 function toImportPath(relPath: string): string {
@@ -419,12 +432,12 @@ function insertRegistration(content: string, registrationLine: string, stack: st
  * arrays. If we can't find a safe spot we return `null` rather than
  * corrupting the module.
  */
-async function wireIntoNestAppModule(
+async function planNestAppModuleWiring(
   projectRoot: string,
   config: PillarConfig,
   resourceName: string,
   ext: string,
-): Promise<{ operation: FileOperation } | null> {
+): Promise<PlannedWiring | null> {
   const candidates = [
     `src/app.module.${ext}`,
     `src/app/app.module.${ext}`,
@@ -468,10 +481,7 @@ async function wireIntoNestAppModule(
 
   if (updated === previousContent) return null;
 
-  await fs.writeFile(fullPath, updated, 'utf-8');
-  return {
-    operation: { type: 'modify', path: modulePath, previousContent },
-  };
+  return { relativePath: modulePath, previousContent, newContent: updated };
 }
 
 
