@@ -12,6 +12,7 @@ import {
 } from '../core/extensions/index.js';
 import { logger, findProjectRoot, withSpinner } from '../utils/index.js';
 import { isPreview, printPlan, type PreviewFlags } from './_preview.js';
+import { maybeAutoGenerateMigration } from './_post-schema-hook.js';
 
 interface AddFieldOptions extends PreviewFlags {
   unique?: boolean;
@@ -45,6 +46,13 @@ export async function addFieldCommand(
 
   if (isPreview(options)) {
     printPlan(plan);
+    await maybeAutoGenerateMigration({
+      projectRoot,
+      config,
+      reason: 'field',
+      subject: resourceName,
+      preview: true,
+    });
     return;
   }
 
@@ -66,6 +74,13 @@ export async function addFieldCommand(
   logger.info('Modified files:');
   logger.list(touched);
   logger.blank();
+
+  await maybeAutoGenerateMigration({
+    projectRoot,
+    config,
+    reason: 'field',
+    subject: resourceName,
+  });
 }
 
 interface AddEndpointOptions extends PreviewFlags {
@@ -169,6 +184,13 @@ export async function addRelationCommand(
 
   if (isPreview(options)) {
     printPlan(plan);
+    await maybeAutoGenerateMigration({
+      projectRoot,
+      config,
+      reason: 'relation',
+      subject: `${sourceResource}_${targetResource}_${relationType}`,
+      preview: true,
+    });
     return;
   }
 
@@ -205,6 +227,13 @@ export async function addRelationCommand(
   logger.info('Modified files:');
   logger.list(touched);
   logger.blank();
+
+  await maybeAutoGenerateMigration({
+    projectRoot,
+    config,
+    reason: 'relation',
+    subject: `${sourceResource}_${targetResource}_${relationType}`,
+  });
 }
 
 async function requireProject(): Promise<string | null> {

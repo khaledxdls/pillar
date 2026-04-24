@@ -454,6 +454,8 @@ Configuration — an optional `database.migrations` block in `pillar.config.json
 
 The block is optional and backwards-compatible — projects created before `pillar db` existed continue to work with adapter defaults.
 
+**Auto-migration on schema edits** — when `database.migrations.autoGenerateOnFieldAdd` is `true`, a successful `pillar add field` or `pillar add relation` also runs `pillar db generate` in the same pass, using a deterministic name slug (`add_<resource>_fields` / `add_<source>_<target>_<type>_relation`). With `--preview`, the hook prints the command it *would* run instead of executing. If the ORM doesn't support the generate step (e.g., Mongoose), the hook prints a skip warning with the adapter's hint — the schema edit still succeeds. If the generate step itself fails, the schema edit is preserved (already recorded in history) and the exact re-run command is printed. The flag defaults to `false` because migrations are durable artifacts and should stay explicit in most workflows.
+
 ---
 
 ### `pillar map`
