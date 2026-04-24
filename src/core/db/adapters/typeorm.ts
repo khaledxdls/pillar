@@ -1,3 +1,4 @@
+import path from 'node:path';
 import type {
   MigrationAdapter,
   MigrateOpts,
@@ -7,6 +8,7 @@ import type {
 } from '../types.js';
 import { UNSUPPORTED } from '../types.js';
 import { packageManagerExec } from '../runner.js';
+import { readPendingMigrationSql } from './preview-files.js';
 
 /**
  * TypeORM migrations adapter.
@@ -65,6 +67,26 @@ export class TypeOrmAdapter implements MigrationAdapter {
   planRollback(ctx: RunContext): PlanResult {
     const args = ['typeorm', 'migration:revert', '-d', dataSourcePath()];
     return toPlan(ctx, args.join(' '), args, { destructive: true, applies: true });
+  }
+
+  /**
+   * TypeORM preview: show the contents of migration files that
+   * `migration:run` would apply.
+   *
+   * TypeORM migrations are TypeScript/JavaScript files — the actual SQL
+   * lives inside `queryRunner.query(...)` calls in the `up()` method.
+   * We show the file bodies rather than parsing SQL out of them: a
+   * partial regex-based extraction would misrepresent dynamic migrations,
+   * and the full file is the most faithful preview.
+   *
+   * The migrations directory matches our `planGenerate` default
+   * (`src/migrations`). Override via `PILLAR_TYPEORM_MIGRATIONS` for
+   * projects that colocate migrations elsewhere.
+   */
+  async previewSql(_opts: MigrateOpts, ctx: RunContext): Promise<string | null> {
+    const rel = process.env['PILLAR_TYPEORM_MIGRATIONS'] ?? 'src/migrations';
+    const abs = path.isAbsolute(rel) ? rel : path.join(ctx.projectRoot, rel);
+    return readPendingMigrationSql(abs, { extensions: ['.ts', '.js'] });
   }
 }
 

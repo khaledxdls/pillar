@@ -394,6 +394,17 @@ dbCmd
   });
 
 dbCmd
+  .command('seed')
+  .description('Run the project seed runner (refuses NODE_ENV=production without --force-production)')
+  .option('--preview', 'Print the command that would run — nothing executed')
+  .option('-y, --yes', 'Skip confirmation prompts')
+  .option('--force-production', 'Override the NODE_ENV=production refusal')
+  .action(async (options) => {
+    const { dbSeedCommand } = await import('../commands/db.js');
+    await dbSeedCommand(options);
+  });
+
+dbCmd
   .command('rollback')
   .description('Revert the last applied migration (where supported by the ORM)')
   .option('--preview', 'Print the command that would run — nothing executed')

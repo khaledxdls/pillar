@@ -1,4 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import path from 'node:path';
+import os from 'node:os';
+import fs from 'fs-extra';
 import type { PillarConfig } from '../config/index.js';
 import { selectAdapter } from './adapter-factory.js';
 import { isUnsupported } from './types.js';
@@ -118,5 +121,76 @@ describe('selectAdapter', () => {
     if (isUnsupported(plan)) throw new Error('expected a runnable plan');
     expect(plan.argv[0]).toBe('pnpm');
     expect(plan.argv[1]).toBe('exec');
+  });
+});
+
+describe('adapter previewSql — Drizzle', () => {
+  let root: string;
+
+  beforeEach(async () => { root = await fs.mkdtemp(path.join(os.tmpdir(), 'pillar-drizzle-')); });
+  afterEach(async () => {
+    delete process.env['PILLAR_DRIZZLE_OUT'];
+    await fs.remove(root);
+  });
+
+  it('returns null when no drizzle out dir exists', async () => {
+    const adapter = selectAdapter(mkConfig('drizzle'));
+    const sql = await adapter.previewSql!({}, { ...CTX, projectRoot: root });
+    expect(sql).toBeNull();
+  });
+
+  it('reads SQL files from the default drizzle/ out dir', async () => {
+    await fs.ensureDir(path.join(root, 'drizzle'));
+    await fs.writeFile(path.join(root, 'drizzle', '0000_init.sql'), 'CREATE TABLE users (id serial);');
+    const adapter = selectAdapter(mkConfig('drizzle'));
+    const sql = await adapter.previewSql!({}, { ...CTX, projectRoot: root });
+    expect(sql).toContain('0000_init.sql');
+    expect(sql).toContain('CREATE TABLE users');
+  });
+
+  it('honors PILLAR_DRIZZLE_OUT override', async () => {
+    const custom = path.join(root, 'custom-migrations');
+    await fs.ensureDir(custom);
+    await fs.writeFile(path.join(custom, '0000_hello.sql'), 'SELECT 1;');
+    process.env['PILLAR_DRIZZLE_OUT'] = custom;
+    const adapter = selectAdapter(mkConfig('drizzle'));
+    const sql = await adapter.previewSql!({}, { ...CTX, projectRoot: root });
+    expect(sql).toContain('0000_hello.sql');
+  });
+});
+
+describe('adapter previewSql — TypeORM', () => {
+  let root: string;
+
+  beforeEach(async () => { root = await fs.mkdtemp(path.join(os.tmpdir(), 'pillar-typeorm-')); });
+  afterEach(async () => {
+    delete process.env['PILLAR_TYPEORM_MIGRATIONS'];
+    await fs.remove(root);
+  });
+
+  it('returns null when src/migrations does not exist', async () => {
+    const adapter = selectAdapter(mkConfig('typeorm'));
+    const sql = await adapter.previewSql!({}, { ...CTX, projectRoot: root });
+    expect(sql).toBeNull();
+  });
+
+  it('reads .ts and .js migration files from src/migrations', async () => {
+    const dir = path.join(root, 'src', 'migrations');
+    await fs.ensureDir(dir);
+    await fs.writeFile(path.join(dir, '1700000000000-AddUser.ts'), 'export class AddUser {}');
+    const adapter = selectAdapter(mkConfig('typeorm'));
+    const sql = await adapter.previewSql!({}, { ...CTX, projectRoot: root });
+    expect(sql).toContain('1700000000000-AddUser.ts');
+    expect(sql).toContain('export class AddUser');
+  });
+
+  it('honors PILLAR_TYPEORM_MIGRATIONS override', async () => {
+    const custom = path.join(root, 'db', 'migrations');
+    await fs.ensureDir(custom);
+    await fs.writeFile(path.join(custom, '001-init.ts'), 'export class Init {}');
+    process.env['PILLAR_TYPEORM_MIGRATIONS'] = custom;
+    const adapter = selectAdapter(mkConfig('typeorm'));
+    const sql = await adapter.previewSql!({}, { ...CTX, projectRoot: root });
+    expect(sql).toContain('001-init.ts');
   });
 });

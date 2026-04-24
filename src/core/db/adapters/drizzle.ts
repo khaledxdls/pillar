@@ -1,3 +1,5 @@
+import path from 'node:path';
+import fs from 'fs-extra';
 import type {
   MigrationAdapter,
   MigrateOpts,
@@ -7,6 +9,7 @@ import type {
 } from '../types.js';
 import { UNSUPPORTED } from '../types.js';
 import { packageManagerExec } from '../runner.js';
+import { readPendingMigrationSql } from './preview-files.js';
 
 /**
  * Drizzle migrations adapter.
@@ -68,6 +71,42 @@ export class DrizzleAdapter implements MigrationAdapter {
       'Write a new migration that reverses the change.',
     );
   }
+
+  /**
+   * Drizzle preview: show SQL that `drizzle-kit migrate` would apply next.
+   *
+   * `drizzle-kit` has no native dry-run for `migrate`, and the set of
+   * "pending" migrations is authoritative only via the DB's
+   * `__drizzle_migrations` table. Without DB access we can only give a
+   * conservative view: every `.sql` file on disk in journal order, which
+   * `drizzle-kit migrate` will apply in the same order (skipping any
+   * already recorded).
+   *
+   * The out directory resolution mirrors drizzle-kit's own defaults:
+   *   1. `PILLAR_DRIZZLE_OUT` env override (useful when drizzle.config
+   *      has a non-default `out` path we can't parse from TS).
+   *   2. `drizzle/` (the drizzle-kit default).
+   *   3. `src/drizzle/` (common convention for `src/`-rooted projects).
+   */
+  async previewSql(_opts: MigrateOpts, ctx: RunContext): Promise<string | null> {
+    const outDir = await resolveDrizzleOutDir(ctx.projectRoot);
+    if (!outDir) return null;
+    return readPendingMigrationSql(outDir, { extensions: ['.sql'] });
+  }
+}
+
+async function resolveDrizzleOutDir(projectRoot: string): Promise<string | null> {
+  const override = process.env['PILLAR_DRIZZLE_OUT'];
+  const candidates = [
+    ...(override ? [override] : []),
+    'drizzle',
+    path.join('src', 'drizzle'),
+  ];
+  for (const rel of candidates) {
+    const abs = path.isAbsolute(rel) ? rel : path.join(projectRoot, rel);
+    if (await fs.pathExists(abs)) return abs;
+  }
+  return null;
 }
 
 function labelOf(args: string[]): string {
