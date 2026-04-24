@@ -1,13 +1,19 @@
-import chalk from 'chalk';
 import { loadConfig } from '../core/config/index.js';
 import { MapManager } from '../core/map/index.js';
 import { HistoryManager } from '../core/history/index.js';
-import { parseFieldDef, addFieldToResource } from '../core/extensions/field-extension.js';
-import { parseEndpointDef, addEndpointToResource } from '../core/extensions/endpoint-extension.js';
-import { addRelationToResource, type RelationType } from '../core/extensions/relation-extension.js';
+import { PlanExecutor } from '../core/plan/index.js';
+import {
+  parseFieldDef,
+  planFieldExtension,
+  parseEndpointDef,
+  planEndpointExtension,
+  planRelationExtension,
+  type RelationType,
+} from '../core/extensions/index.js';
 import { logger, findProjectRoot, withSpinner } from '../utils/index.js';
+import { isPreview, printPlan, type PreviewFlags } from './_preview.js';
 
-interface AddFieldOptions {
+interface AddFieldOptions extends PreviewFlags {
   unique?: boolean;
   optional?: boolean;
 }
@@ -22,8 +28,8 @@ export async function addFieldCommand(
 
   const config = await loadConfig(projectRoot);
 
-  // Handle both quoted multi-field strings and separate arguments
-  // e.g., "role:string isActive:boolean" or role:string isActive:boolean
+  // Tolerate both quoted multi-field strings and separate arguments:
+  //   "role:string isActive:boolean"  or  role:string isActive:boolean
   const fields = fieldStrings
     .flatMap((f) => f.trim().split(/\s+/))
     .filter((f) => f.includes(':'))
@@ -34,29 +40,35 @@ export async function addFieldCommand(
       return def;
     });
 
-  const result = await withSpinner(
-    `Adding ${fields.length} field(s) to ${resourceName}`,
-    async () => addFieldToResource(projectRoot, config, resourceName, fields),
-  );
+  const command = `add field ${resourceName} ${fieldStrings.join(' ')}`.trim();
+  const plan = await planFieldExtension(projectRoot, config, resourceName, fields, command);
 
-  if (result.modifiedFiles.length === 0) {
+  if (isPreview(options)) {
+    printPlan(plan);
+    return;
+  }
+
+  if (plan.changes.length === 0) {
     logger.error(`No files were modified. Check that resource "${resourceName}" exists.`);
     process.exitCode = 1;
     return;
   }
 
-  // Record history
-  const history = new HistoryManager(projectRoot);
-  await history.record(`add field ${resourceName} ${fieldStrings.join(' ')}`, result.operations);
+  const { operations, touched } = await withSpinner(
+    `Adding ${fields.length} field(s) to ${resourceName}`,
+    async () => new PlanExecutor(projectRoot).execute(plan),
+  );
+
+  await new HistoryManager(projectRoot).record(command, operations);
 
   logger.blank();
   logger.success(`Added fields to ${resourceName}`);
   logger.info('Modified files:');
-  logger.list(result.modifiedFiles);
+  logger.list(touched);
   logger.blank();
 }
 
-interface AddEndpointOptions {
+interface AddEndpointOptions extends PreviewFlags {
   purpose?: string;
 }
 
@@ -81,40 +93,47 @@ export async function addEndpointCommand(
 
   const endpoint = parseEndpointDef(endpointStr, resourceName);
   const purpose = options.purpose ?? `${endpoint.method} ${endpoint.path}`;
+  const command = `add endpoint ${resourceName} "${endpointStr}"`;
 
-  const result = await withSpinner(
-    `Adding endpoint ${endpoint.method} ${endpoint.path} to ${resourceName}`,
-    async () => addEndpointToResource(projectRoot, config, resourceName, endpoint, purpose),
-  );
+  const plan = await planEndpointExtension(projectRoot, config, resourceName, endpoint, purpose, command);
 
-  if (result.modifiedFiles.length === 0) {
+  if (isPreview(options)) {
+    printPlan(plan);
+    return;
+  }
+
+  if (plan.changes.length === 0) {
     logger.error(`No files were modified. Check that resource "${resourceName}" exists.`);
     process.exitCode = 1;
     return;
   }
 
-  // Update map with endpoint purpose
-  if (config.map.autoUpdate && result.modifiedFiles.length > 0) {
+  const { operations, touched } = await withSpinner(
+    `Adding endpoint ${endpoint.method} ${endpoint.path} to ${resourceName}`,
+    async () => new PlanExecutor(projectRoot).execute(plan),
+  );
+
+  // Map updates reflect the new endpoint purpose, not the file delta.
+  if (config.map.autoUpdate && touched.length > 0) {
     const mapManager = new MapManager(projectRoot);
     const map = await mapManager.load();
     if (map) {
-      for (const file of result.modifiedFiles) {
+      for (const file of touched) {
         await mapManager.registerEntry(file, `(updated) added ${endpoint.method} ${endpoint.path}`);
       }
     }
   }
 
-  const history = new HistoryManager(projectRoot);
-  await history.record(`add endpoint ${resourceName} "${endpointStr}"`, result.operations);
+  await new HistoryManager(projectRoot).record(command, operations);
 
   logger.blank();
   logger.success(`Added ${endpoint.method} ${endpoint.path} to ${resourceName}`);
   logger.info('Modified files:');
-  logger.list(result.modifiedFiles);
+  logger.list(touched);
   logger.blank();
 }
 
-interface AddRelationOptions {
+interface AddRelationOptions extends PreviewFlags {
   type?: string;
 }
 
@@ -139,18 +158,21 @@ export async function addRelationCommand(
   }
 
   const config = await loadConfig(projectRoot);
+  const command = `add relation ${sourceResource} ${targetResource} --type ${relationType}`;
 
-  const result = await withSpinner(
-    `Adding ${relationType} relation: ${sourceResource} → ${targetResource}`,
-    async () =>
-      addRelationToResource(projectRoot, config, {
-        sourceResource,
-        targetResource,
-        type: relationType,
-      }),
+  const plan = await planRelationExtension(
+    projectRoot,
+    config,
+    { sourceResource, targetResource, type: relationType },
+    command,
   );
 
-  if (result.modifiedFiles.length === 0) {
+  if (isPreview(options)) {
+    printPlan(plan);
+    return;
+  }
+
+  if (plan.changes.length === 0) {
     logger.error(
       `No files were modified. Check that resources "${sourceResource}" and "${targetResource}" exist.`,
     );
@@ -158,24 +180,30 @@ export async function addRelationCommand(
     return;
   }
 
-  // Update map
+  const { operations, touched } = await withSpinner(
+    `Adding ${relationType} relation: ${sourceResource} → ${targetResource}`,
+    async () => new PlanExecutor(projectRoot).execute(plan),
+  );
+
   if (config.map.autoUpdate) {
     const mapManager = new MapManager(projectRoot);
     const map = await mapManager.load();
     if (map) {
-      for (const file of result.modifiedFiles) {
-        await mapManager.registerEntry(file, `(updated) added ${relationType} relation: ${sourceResource} ↔ ${targetResource}`);
+      for (const file of touched) {
+        await mapManager.registerEntry(
+          file,
+          `(updated) added ${relationType} relation: ${sourceResource} ↔ ${targetResource}`,
+        );
       }
     }
   }
 
-  const history = new HistoryManager(projectRoot);
-  await history.record(`add relation ${sourceResource} ${targetResource} --type ${relationType}`, result.operations);
+  await new HistoryManager(projectRoot).record(command, operations);
 
   logger.blank();
   logger.success(`Added ${relationType} relation: ${sourceResource} → ${targetResource}`);
   logger.info('Modified files:');
-  logger.list(result.modifiedFiles);
+  logger.list(touched);
   logger.blank();
 }
 

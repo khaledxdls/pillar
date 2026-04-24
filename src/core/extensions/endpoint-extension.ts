@@ -2,6 +2,8 @@ import path from 'node:path';
 import fs from 'fs-extra';
 import type { PillarConfig } from '../config/index.js';
 import type { FileOperation } from '../history/types.js';
+import { PlanBuilder, PlanExecutor } from '../plan/index.js';
+import type { Plan } from '../plan/index.js';
 import { resolveResourceFilePath } from '../../utils/resolve-resource-path.js';
 import type { Stack } from '../../utils/constants.js';
 import { toCamelCase, toPascalCase, pluralizeResource } from '../../utils/naming.js';
@@ -45,12 +47,52 @@ export function parseEndpointDef(raw: string, resourceName?: string): EndpointDe
 }
 
 /**
- * Add a custom endpoint to a resource.
+ * Compute the Plan for adding an endpoint. No I/O writes.
  *
- * Injects the handler method into the controller class, and for non-NestJS
- * stacks registers the route in the routes file. All edits are AST-based
- * and idempotent — re-running with the same inputs is a no-op.
+ * Covers controller-method injection (all stacks) and route-registration
+ * injection (all stacks except NestJS, which registers via decorators).
  */
+export async function planEndpointExtension(
+  projectRoot: string,
+  config: PillarConfig,
+  resourceName: string,
+  endpoint: EndpointDefinition,
+  purpose: string,
+  command: string,
+): Promise<Plan> {
+  const ext = config.project.language === 'typescript' ? 'ts' : 'js';
+  const isTS = config.project.language === 'typescript';
+  const stack = config.project.stack;
+  const arch = config.project.architecture;
+  const builder = new PlanBuilder(projectRoot, command);
+
+  const controllerRel = resolveResourceFilePath(arch, resourceName, 'controller', ext);
+  const controllerFull = path.join(projectRoot, controllerRel);
+  if (await fs.pathExists(controllerFull)) {
+    const previous = await fs.readFile(controllerFull, 'utf-8');
+    const className = `${toPascalCase(resourceName)}Controller`;
+    const methodCode = buildControllerMethod(endpoint, purpose, isTS, stack);
+    const updated = addMethodToClass(previous, className, methodCode);
+    if (updated !== null && updated !== previous) {
+      await builder.modify(controllerRel, updated, `add ${endpoint.method} ${endpoint.path} handler`);
+    }
+  }
+
+  if (stack !== 'nestjs') {
+    const routesRel = resolveResourceFilePath(arch, resourceName, 'routes', ext);
+    const routesFull = path.join(projectRoot, routesRel);
+    if (await fs.pathExists(routesFull)) {
+      const previous = await fs.readFile(routesFull, 'utf-8');
+      const updated = buildRoutesUpdate(previous, endpoint, stack, resourceName);
+      if (updated !== null && updated !== previous) {
+        await builder.modify(routesRel, updated, `register ${endpoint.method} ${endpoint.path}`);
+      }
+    }
+  }
+
+  return builder.build();
+}
+
 export async function addEndpointToResource(
   projectRoot: string,
   config: PillarConfig,
@@ -58,54 +100,16 @@ export async function addEndpointToResource(
   endpoint: EndpointDefinition,
   purpose: string,
 ): Promise<EndpointResult> {
-  const ext = config.project.language === 'typescript' ? 'ts' : 'js';
-  const isTS = config.project.language === 'typescript';
-  const stack = config.project.stack;
-  const arch = config.project.architecture;
-  const operations: FileOperation[] = [];
-  const modifiedFiles: string[] = [];
-
-  const controllerPath = path.join(projectRoot, resolveResourceFilePath(arch, resourceName, 'controller', ext));
-  if (await fs.pathExists(controllerPath)) {
-    const result = await injectControllerMethod(controllerPath, projectRoot, resourceName, endpoint, purpose, isTS, stack);
-    if (result) { operations.push(result.operation); modifiedFiles.push(result.relativePath); }
-  }
-
-  // NestJS registers routes via the `@Get/@Post/…` decorators on the
-  // controller method itself — no separate routes file.
-  if (stack !== 'nestjs') {
-    const routesPath = path.join(projectRoot, resolveResourceFilePath(arch, resourceName, 'routes', ext));
-    if (await fs.pathExists(routesPath)) {
-      const result = await injectRouteStatement(routesPath, projectRoot, endpoint, stack, resourceName);
-      if (result) { operations.push(result.operation); modifiedFiles.push(result.relativePath); }
-    }
-  }
-
-  return { operations, modifiedFiles };
-}
-
-async function injectControllerMethod(
-  controllerPath: string,
-  projectRoot: string,
-  resourceName: string,
-  endpoint: EndpointDefinition,
-  purpose: string,
-  isTS: boolean,
-  stack: Stack,
-): Promise<{ operation: FileOperation; relativePath: string } | null> {
-  const previousContent = await fs.readFile(controllerPath, 'utf-8');
-  const className = `${toPascalCase(resourceName)}Controller`;
-  const methodCode = buildControllerMethod(endpoint, purpose, isTS, stack);
-
-  const updated = addMethodToClass(previousContent, className, methodCode);
-  if (updated === null || updated === previousContent) return null;
-
-  await fs.writeFile(controllerPath, updated, 'utf-8');
-  const relativePath = path.relative(projectRoot, controllerPath);
-  return {
-    operation: { type: 'modify', path: relativePath, previousContent },
-    relativePath,
-  };
+  const plan = await planEndpointExtension(
+    projectRoot,
+    config,
+    resourceName,
+    endpoint,
+    purpose,
+    `add endpoint ${resourceName} ${endpoint.method} ${endpoint.path}`,
+  );
+  const { operations, touched } = await new PlanExecutor(projectRoot).execute(plan);
+  return { operations, modifiedFiles: touched };
 }
 
 function buildControllerMethod(
@@ -155,9 +159,6 @@ function buildControllerMethod(
     ].join('\n');
   }
 
-  // Express (default) + Next.js fall through here — Next.js doesn't
-  // actually use generated controllers (App Router handler is written
-  // directly by the resource generator) but keep the shape consistent.
   const req = isTS ? 'req: Request' : 'req';
   const res = isTS ? 'res: Response' : 'res';
   return [
@@ -169,53 +170,31 @@ function buildControllerMethod(
   ].join('\n');
 }
 
-async function injectRouteStatement(
-  routesPath: string,
-  projectRoot: string,
+function buildRoutesUpdate(
+  previousContent: string,
   endpoint: EndpointDefinition,
   stack: Stack,
   resourceName: string,
-): Promise<{ operation: FileOperation; relativePath: string } | null> {
-  const previousContent = await fs.readFile(routesPath, 'utf-8');
+): string | null {
   const methodLower = endpoint.method.toLowerCase();
   const camelName = toCamelCase(resourceName);
   const pluralPath = pluralizeResource(camelName);
 
-  let statement: string;
-  let updated: string;
-
   switch (stack) {
-    case 'fastify':
+    case 'fastify': {
       // Fastify routes live inside the exported `${name}Routes` function body.
-      // AST insertion guarantees the new statement lands before the closing
-      // brace even if the body already contains nested braces/comments.
-      statement = `app.${methodLower}('/${pluralPath}${endpoint.path}', (req, res) => controller.${endpoint.handlerName}(req, res));`;
-      {
-        const result = appendStatementToFunction(previousContent, `${camelName}Routes`, statement);
-        if (result === null) return null;
-        updated = result;
-      }
-      break;
-
-    case 'hono':
-      statement = `${camelName}Routes.${methodLower}('${endpoint.path}', (c) => controller.${endpoint.handlerName}(c));`;
-      updated = addModuleStatement(previousContent, statement);
-      break;
-
-    default:
-      // Express: must insert before the trailing `export { router as … }`
-      // so the export remains the last statement in the module.
-      statement = `router.${methodLower}('${endpoint.path}', (req, res) => controller.${endpoint.handlerName}(req, res));`;
-      updated = addModuleStatement(previousContent, statement, { beforeLastExport: true });
-      break;
+      const statement = `app.${methodLower}('/${pluralPath}${endpoint.path}', (req, res) => controller.${endpoint.handlerName}(req, res));`;
+      return appendStatementToFunction(previousContent, `${camelName}Routes`, statement);
+    }
+    case 'hono': {
+      const statement = `${camelName}Routes.${methodLower}('${endpoint.path}', (c) => controller.${endpoint.handlerName}(c));`;
+      return addModuleStatement(previousContent, statement);
+    }
+    default: {
+      // Express: insert before the trailing `export { router … }` so the
+      // export remains the last statement in the module.
+      const statement = `router.${methodLower}('${endpoint.path}', (req, res) => controller.${endpoint.handlerName}(req, res));`;
+      return addModuleStatement(previousContent, statement, { beforeLastExport: true });
+    }
   }
-
-  if (updated === previousContent) return null;
-
-  await fs.writeFile(routesPath, updated, 'utf-8');
-  const relativePath = path.relative(projectRoot, routesPath);
-  return {
-    operation: { type: 'modify', path: relativePath, previousContent },
-    relativePath,
-  };
 }

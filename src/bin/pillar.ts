@@ -68,7 +68,8 @@ addCmd
   .option('--fields <fields>', 'Field definitions (e.g., "name:string email:string")')
   .option('--no-test', 'Skip test file generation')
   .option('--only <types>', 'Generate only specific files (e.g., "service,controller")')
-  .option('--dry-run', 'Preview without creating')
+  .option('--preview', 'Show a full diff of what would change — no files written')
+  .option('--dry-run', '(deprecated) alias for --preview')
   .option('-f, --force', 'Overwrite existing files')
   .action(async (name: string, options) => {
     const { addResourceCommand } = await import('../commands/add.js');
@@ -108,7 +109,9 @@ addCmd
   .description('Add fields to an existing resource (e.g., "email:string age:number")')
   .option('-u, --unique', 'Mark fields as unique')
   .option('-o, --optional', 'Mark fields as optional')
-  .action(async (resource: string, fields: string[], options: { unique?: boolean; optional?: boolean }) => {
+  .option('--preview', 'Show a full diff of what would change — no files written')
+  .option('--dry-run', '(deprecated) alias for --preview')
+  .action(async (resource: string, fields: string[], options) => {
     const { addFieldCommand } = await import('../commands/extensions.js');
     await addFieldCommand(resource, fields, options);
   });
@@ -117,7 +120,9 @@ addCmd
   .command('endpoint <resource> <definition>')
   .description('Add an endpoint to a resource (e.g., "GET /users/:id/posts")')
   .option('-p, --purpose <text>', 'Purpose of this endpoint')
-  .action(async (resource: string, definition: string, options: { purpose?: string }) => {
+  .option('--preview', 'Show a full diff of what would change — no files written')
+  .option('--dry-run', '(deprecated) alias for --preview')
+  .action(async (resource: string, definition: string, options) => {
     const { addEndpointCommand } = await import('../commands/extensions.js');
     await addEndpointCommand(resource, definition, options);
   });
@@ -138,7 +143,9 @@ addCmd
   .command('relation <source> <target>')
   .description('Add a relation between resources (e.g., "user posts --type one-to-many")')
   .option('-t, --type <type>', 'Relation type: one-to-one, one-to-many, many-to-many', 'one-to-many')
-  .action(async (source: string, target: string, options: { type?: string }) => {
+  .option('--preview', 'Show a full diff of what would change — no files written')
+  .option('--dry-run', '(deprecated) alias for --preview')
+  .action(async (source: string, target: string, options) => {
     const { addRelationCommand } = await import('../commands/extensions.js');
     await addRelationCommand(source, target, options);
   });
@@ -327,6 +334,74 @@ lintCmd
   .action(async (options: { strict?: boolean; json?: boolean }) => {
     const { lintArchitectureCommand } = await import('../commands/lint.js');
     await lintArchitectureCommand(options);
+  });
+
+// --- pillar db ---
+const dbCmd = program
+  .command('db')
+  .description('Database migrations — generate, apply, deploy, inspect');
+
+dbCmd
+  .command('generate')
+  .description('Create a new migration file without applying it')
+  .option('-n, --name <name>', 'Migration name (required by Prisma and TypeORM)')
+  .option('--preview', 'Print the command that would run — nothing executed')
+  .action(async (options) => {
+    const { dbGenerateCommand } = await import('../commands/db.js');
+    await dbGenerateCommand(options);
+  });
+
+dbCmd
+  .command('migrate')
+  .description('Apply migrations in development (refuses NODE_ENV=production without --force-production)')
+  .option('-n, --name <name>', 'Migration name (required by Prisma)')
+  .option('--preview', 'Print the command + SQL diff, if available — nothing executed')
+  .option('-y, --yes', 'Skip confirmation prompts')
+  .option('--force-production', 'Override the NODE_ENV=production refusal (use deploy instead)')
+  .action(async (options) => {
+    const { dbMigrateCommand } = await import('../commands/db.js');
+    await dbMigrateCommand(options);
+  });
+
+dbCmd
+  .command('deploy')
+  .description('Apply pending migrations (production-safe — the command to run in CI/CD)')
+  .option('--preview', 'Print the command that would run — nothing executed')
+  .option('-y, --yes', 'Skip confirmation prompts')
+  .action(async (options) => {
+    const { dbDeployCommand } = await import('../commands/db.js');
+    await dbDeployCommand(options);
+  });
+
+dbCmd
+  .command('status')
+  .description('Show applied vs pending migrations')
+  .option('--preview', 'Print the command that would run — nothing executed')
+  .action(async (options) => {
+    const { dbStatusCommand } = await import('../commands/db.js');
+    await dbStatusCommand(options);
+  });
+
+dbCmd
+  .command('reset')
+  .description('Drop and recreate the database (irreversible — requires --confirm <project-name>)')
+  .option('--confirm <name>', 'Confirmation token — must equal your project name')
+  .option('--preview', 'Print the command that would run — nothing executed')
+  .option('--force-production', 'Override the NODE_ENV=production refusal')
+  .action(async (options) => {
+    const { dbResetCommand } = await import('../commands/db.js');
+    await dbResetCommand(options);
+  });
+
+dbCmd
+  .command('rollback')
+  .description('Revert the last applied migration (where supported by the ORM)')
+  .option('--preview', 'Print the command that would run — nothing executed')
+  .option('-y, --yes', 'Skip confirmation prompts')
+  .option('--force-production', 'Override the NODE_ENV=production refusal')
+  .action(async (options) => {
+    const { dbRollbackCommand } = await import('../commands/db.js');
+    await dbRollbackCommand(options);
   });
 
 // --- pillar undo ---

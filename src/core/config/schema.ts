@@ -25,6 +25,23 @@ export const pillarConfigSchema = z.object({
   database: z.object({
     type: z.enum(SUPPORTED_DATABASES),
     orm: z.enum(SUPPORTED_ORMS),
+    // Optional migration settings. Absent on projects predating the
+    // `pillar db` command; populated lazily the first time a user edits
+    // `pillar.config.json` to tune migration behavior.
+    migrations: z.object({
+      // Directory where migration files live. Adapters use sensible
+      // defaults when omitted: `prisma/migrations` for Prisma,
+      // `drizzle/` for Drizzle, `src/migrations/` for TypeORM.
+      directory: z.string().optional(),
+      // Path to the schema source — informational today, reserved for
+      // adapters that need it for SQL preview when the default lookup
+      // isn't enough (e.g., split Prisma schema files).
+      schema: z.string().optional(),
+      // If true, `add field` / `add relation` will auto-generate a
+      // migration after the schema edit. Off by default — migrations
+      // change the DB and should remain an explicit user action.
+      autoGenerateOnFieldAdd: z.boolean().default(false),
+    }).optional(),
   }),
   generation: z.object({
     overwrite: z.boolean().default(false),
