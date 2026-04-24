@@ -1,3 +1,100 @@
+<div align="center">
+  <img src="./Pillar_logo.png" alt="Pillar" width="200" />
+
+  <h3>The architecture engine for Node.js</h3>
+  <p><em>Scaffold, generate, and maintain production-ready projects — with a living map your AI can actually afford to read.</em></p>
+
+  <p>
+    <a href="https://www.npmjs.com/package/@pillar-cli/pillar"><img src="https://img.shields.io/npm/v/@pillar-cli/pillar?color=2563eb&label=npm" alt="npm version" /></a>
+    <a href="https://www.npmjs.com/package/@pillar-cli/pillar"><img src="https://img.shields.io/npm/dm/@pillar-cli/pillar?color=2563eb&label=downloads" alt="npm downloads" /></a>
+    <img src="https://img.shields.io/badge/tests-366_passing-16a34a" alt="tests" />
+    <img src="https://img.shields.io/badge/stacks-5-f59e0b" alt="stacks" />
+    <img src="https://img.shields.io/badge/ORMs-4-a855f7" alt="ORMs" />
+    <a href="./LICENSE"><img src="https://img.shields.io/npm/l/@pillar-cli/pillar?color=64748b" alt="license" /></a>
+  </p>
+</div>
+
+---
+
+## ⚡ 60 seconds to a production API
+
+```bash
+$ npm install -g @pillar-cli/pillar
+
+$ pillar init shop --stack fastify --orm prisma --yes
+   ✔ Scaffolded 24 files    ✔ Installed deps    ✔ git initialized
+
+$ pillar add resource product --fields "name:string price:number stock:number"
+   ✔ 8 files (model · repo · service · controller · routes · validator · types · test)
+   ✔ Map updated    ✔ Route registered    ✔ Tests pass
+
+$ pillar db migrate --name init --preview    # SQL preview — zero writes
+$ pillar db migrate --name init              # applied.
+
+# Your API is live. `npm run dev` and hit /products.
+```
+
+---
+
+## 🧠 The idea
+
+Every CLI scaffolder dumps boilerplate and walks away. Pillar **stays**.
+
+|                    | Typical CLI                | Pillar                                            |
+|--------------------|----------------------------|---------------------------------------------------|
+| First minute       | dumps 20 files             | dumps 20 files **+ a project map**                |
+| Week two           | you're on your own         | `pillar add` / `db` / `doctor` keep working       |
+| With AI tools      | feed it 30k lines          | feed it 500 tokens — the map                      |
+| Stack swap         | rewrite from scratch       | map + generators are stack-agnostic               |
+| Schema ↔ migration | two tools, two commands    | one pass (`autoGenerateOnFieldAdd: true`)         |
+| Previews           | `--dry-run` (filenames)    | byte-exact diffs + real SQL                       |
+
+---
+
+## 🧩 What's in the box
+
+<table>
+  <tr>
+    <td width="33%" valign="top"><b>🏗️ 5 stacks</b><br>Express · Fastify · NestJS · Hono · Next.js</td>
+    <td width="33%" valign="top"><b>🗄️ 4 ORMs</b><br>Prisma · Drizzle · TypeORM · Mongoose</td>
+    <td width="33%" valign="top"><b>🏛️ 3 architectures</b><br>Feature-first · Layered · Modular</td>
+  </tr>
+  <tr>
+    <td valign="top"><b>🔍 Living map</b><br>500-token summary of every file's purpose — the AI context that doesn't explode your bill</td>
+    <td valign="top"><b>🛡️ Production-safe</b><br><code>NODE_ENV</code> guards · confirm tokens · <code>spawn</code> with no shell</td>
+    <td valign="top"><b>🔄 Reversible</b><br>Every op journaled · <code>pillar undo</code> walks it back</td>
+  </tr>
+  <tr>
+    <td valign="top"><b>👁️ Byte-exact preview</b><br>Real diffs + real SQL before any write — on every destructive command</td>
+    <td valign="top"><b>🤖 AI-native generation</b><br>Two-pass planner: map → plan → file-enriched refinement</td>
+    <td valign="top"><b>📐 Architecture lint</b><br>AL001–AL006 catch layer leaks and feature bleed statically</td>
+  </tr>
+</table>
+
+---
+
+## 🎯 How a single command feels
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  $ pillar add resource order --fields "total:number userId:id"   │
+└──────────────────────────────────────────────────────────────────┘
+                               │
+                               ▼
+     ┌────────────────────────────────────────────────────────┐
+     │  1. Plan the change against the map (pure, no I/O)     │
+     │  2. (--preview) render byte-exact diff, then stop      │
+     │  3. Write files · register purposes · inject route     │
+     │  4. Record the op in .pillar/history.json (undo-able)  │
+     │  5. autoGenerate? → pillar db generate add_order_fields │
+     └────────────────────────────────────────────────────────┘
+                               │
+                               ▼
+                Type-safe · map-tracked · reversible.
+```
+
+---
+
 # Pillar
 
 AI-aware architecture engine — scaffold, generate, and maintain production-ready projects.
