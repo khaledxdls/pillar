@@ -21,6 +21,8 @@
  *      or filesystem touch.
  */
 
+import path from 'node:path';
+import fs from 'fs-extra';
 import chalk from 'chalk';
 import { loadConfig, type PillarConfig } from '../core/config/index.js';
 import {
@@ -252,6 +254,8 @@ export async function dbDeployCommand(options: DbDeployOptions): Promise<void> {
     ...options,
     operation: 'deploy',
     resolve: (adapter, ctx) => adapter.planDeploy(ctx),
+    previewSql: (adapter, ctx) =>
+      adapter.previewSql ? adapter.previewSql({}, ctx) : Promise.resolve(null),
   });
 }
 
@@ -290,4 +294,113 @@ export async function dbRollbackCommand(options: DbRollbackOptions): Promise<voi
     operation: 'rollback',
     resolve: (adapter, ctx) => adapter.planRollback(ctx),
   });
+}
+
+// ---------------------------------------------------------------------------
+// pillar db seed
+// ---------------------------------------------------------------------------
+
+export interface DbSeedOptions extends BaseDbOptions {}
+
+/**
+ * `pillar db seed` — execute the project's seed runner.
+ *
+ * Seeding is ORM-agnostic (the runner is a plain script that calls into
+ * whatever client the project uses), so this command does not go
+ * through the adapter layer. It does share the surrounding behavior
+ * with the other `pillar db` commands: `--preview` prints the argv
+ * without executing, and the production guard refuses to run when
+ * `NODE_ENV=production` unless `--force-production` is passed. Seeds
+ * insert data and are therefore treated as destructive.
+ *
+ * The runner is discovered from the project's language setting
+ * (`src/seeds/run.ts` for TypeScript, `src/seeds/run.js` otherwise) —
+ * matching what `pillar seed generate` produces. If missing, we point
+ * the user at the generator rather than silently doing nothing.
+ */
+export async function dbSeedCommand(options: DbSeedOptions): Promise<void> {
+  const projectRoot = await findProjectRoot();
+  if (!projectRoot) {
+    logger.error('Not inside a Pillar project.', 'Run "pillar init" first.');
+    process.exitCode = 1;
+    return;
+  }
+
+  const config = await loadConfig(projectRoot);
+  const ctx = buildRunContext(projectRoot, config);
+  const plan = buildSeedPlan(projectRoot, config);
+
+  if (isUnsupported(plan)) {
+    logger.error(plan.reason, plan.hint);
+    process.exitCode = 1;
+    return;
+  }
+
+  if (isPreview(options)) {
+    await printDbPreview('seed', seedAdapterStub, plan, ctx);
+    return;
+  }
+
+  const guard = enforceProductionGuards(plan, options);
+  if (!guard.ok) {
+    logger.error(guard.message, guard.hint);
+    process.exitCode = 1;
+    return;
+  }
+
+  logger.info(`${chalk.cyan(plan.label)}`);
+  try {
+    const result = await runCommand(plan, ctx);
+    logger.blank();
+    logger.success(`seed completed in ${(result.durationMs / 1000).toFixed(1)}s`);
+  } catch (err) {
+    if (err instanceof MigrationError) {
+      logger.error('seed failed', err.stderrTail || `exit ${err.exitCode}`);
+      process.exitCode = err.exitCode > 0 ? err.exitCode : 1;
+      return;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Minimal adapter-shaped value so `printDbPreview` can label the seed
+ * preview with a display name without needing an ORM-specific adapter.
+ */
+const seedAdapterStub = {
+  orm: 'none' as const,
+  displayName: 'Seed runner',
+} as unknown as MigrationAdapter;
+
+function buildSeedPlan(projectRoot: string, config: PillarConfig): PlanResult {
+  const isTs = config.project.language === 'typescript';
+  const relRunner = `src/seeds/run.${isTs ? 'ts' : 'js'}`;
+  const absRunner = path.join(projectRoot, relRunner);
+
+  if (!fs.pathExistsSync(absRunner)) {
+    return {
+      kind: 'unsupported',
+      reason: `No seed runner found at ${relRunner}`,
+      hint: 'Run "pillar seed generate <resource>" to scaffold one.',
+    };
+  }
+
+  // `npx tsx` for TS, `node` for JS. We use the package-manager-aware
+  // exec for tsx so pnpm / yarn projects don't accidentally pull down a
+  // global `npx` copy; for the JS path, `node` is always on PATH.
+  const argv = isTs
+    ? [config.project.packageManager === 'npm' ? 'npx' : config.project.packageManager,
+       ...(config.project.packageManager === 'pnpm' ? ['exec', 'tsx'] :
+           config.project.packageManager === 'yarn' ? ['tsx'] :
+           ['--no-install', 'tsx']),
+       relRunner]
+    : ['node', relRunner];
+
+  return {
+    label: `seed runner (${relRunner})`,
+    argv,
+    cwd: projectRoot,
+    destructive: true,
+    applies: true,
+  };
 }
