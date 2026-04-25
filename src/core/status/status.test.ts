@@ -3,7 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import fs from 'fs-extra';
 import type { PillarConfig } from '../config/index.js';
-import { runStatus } from './status.js';
+import { runStatus, runStatusFixes } from './status.js';
 
 /**
  * Status tests are integration-shaped: each scenario writes a small
@@ -177,5 +177,83 @@ describe('runStatus', () => {
     await writeMap(root, {});
     const report = await runStatus(root, mkConfig({ orm: 'mongoose' }));
     expect(report.overall).toBe('ok');
+  });
+});
+
+describe('runStatusFixes', () => {
+  let root: string;
+
+  beforeEach(async () => { root = await fs.mkdtemp(path.join(os.tmpdir(), 'pillar-status-fix-')); });
+  afterEach(async () => { await fs.remove(root); });
+
+  it('returns no fixes when all sections are ok', async () => {
+    await writeMap(root, {});
+    const cfg = mkConfig({ orm: 'mongoose' });
+    const report = await runStatus(root, cfg);
+    const fixes = await runStatusFixes(root, cfg, report);
+    expect(fixes).toEqual([]);
+  });
+
+  it('rebuilds a missing map (Map fail → fix)', async () => {
+    const cfg = mkConfig({ orm: 'mongoose' });
+    const report = await runStatus(root, cfg);
+    expect(report.sections.find((s) => s.name === 'Map')?.level).toBe('fail');
+
+    const fixes = await runStatusFixes(root, cfg, report);
+    const mapFix = fixes.find((f) => f.section === 'Map');
+    expect(mapFix?.changed).toBe(true);
+    expect(await fs.pathExists(path.join(root, '.pillar', 'map.json'))).toBe(true);
+
+    // After fix, status should report Map ok
+    const after = await runStatus(root, cfg);
+    expect(after.sections.find((s) => s.name === 'Map')?.level).toBe('ok');
+  });
+
+  it('syncs missing env keys (Env warn → fix)', async () => {
+    await writeMap(root, {});
+    await fs.writeFile(path.join(root, '.env.example'), 'DATABASE_URL=postgres://example\nPORT=3000\n');
+    await fs.writeFile(path.join(root, '.env'), 'DATABASE_URL=postgres://localhost\n');
+
+    const cfg = mkConfig({ orm: 'mongoose' });
+    const report = await runStatus(root, cfg);
+    expect(report.sections.find((s) => s.name === 'Env')?.level).toBe('warn');
+
+    const fixes = await runStatusFixes(root, cfg, report);
+    const envFix = fixes.find((f) => f.section === 'Env');
+    expect(envFix?.changed).toBe(true);
+    expect(envFix?.details).toContain('PORT');
+
+    const envContent = await fs.readFile(path.join(root, '.env'), 'utf-8');
+    expect(envContent).toMatch(/PORT=/);
+  });
+
+  it('does not attempt Migrations or Plugins fixes', async () => {
+    await writeMap(root, {});
+    // typeorm without migrations dir → warn on Migrations
+    const cfg = mkConfig({ orm: 'typeorm' });
+    const report = await runStatus(root, cfg);
+    expect(report.sections.find((s) => s.name === 'Migrations')?.level).toBe('warn');
+
+    const fixes = await runStatusFixes(root, cfg, report);
+    expect(fixes.find((f) => f.section === 'Migrations')).toBeUndefined();
+    expect(fixes.find((f) => f.section === 'Plugins')).toBeUndefined();
+  });
+
+  it('is idempotent — running fixes twice changes nothing the second time', async () => {
+    await fs.writeFile(path.join(root, '.env.example'), 'PORT=3000\n');
+    await fs.writeFile(path.join(root, '.env'), '');
+    const cfg = mkConfig({ orm: 'mongoose' });
+
+    const r1 = await runStatus(root, cfg);
+    const f1 = await runStatusFixes(root, cfg, r1);
+    expect(f1.find((f) => f.section === 'Env')?.changed).toBe(true);
+
+    const r2 = await runStatus(root, cfg);
+    const f2 = await runStatusFixes(root, cfg, r2);
+    // Idempotency: a re-run either skips Env entirely (status now ok)
+    // or runs sync and reports `changed: false` because nothing was
+    // missing. Both are valid; what must NOT happen is a second write.
+    const env2 = f2.find((f) => f.section === 'Env');
+    if (env2) expect(env2.changed).toBe(false);
   });
 });

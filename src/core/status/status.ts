@@ -25,6 +25,17 @@ import { MapManager } from '../map/index.js';
 import { HistoryManager } from '../history/index.js';
 import { EnvManager } from '../env/index.js';
 
+export interface FixReport {
+  /** Section name this fix applies to (matches `StatusSection.name`). */
+  section: string;
+  /** Whether the fix actually changed anything. Idempotent fixes are common. */
+  changed: boolean;
+  /** Human-readable summary printed in TTY mode. */
+  summary: string;
+  /** Optional structured details (filenames, keys, etc). */
+  details?: string[];
+}
+
 export type StatusLevel = 'ok' | 'warn' | 'fail';
 
 export interface StatusSection {
@@ -300,6 +311,102 @@ function humanAgo(ts: number): string {
 
 // ---------------------------------------------------------------------------
 // Section: plugins
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Fixers
+// ---------------------------------------------------------------------------
+
+/**
+ * Apply known auto-fixes for sections that are warn-or-fail in the
+ * given report. Each fixer is idempotent — running it on a healthy
+ * project is a no-op that returns `changed: false`. The caller
+ * (`pillar status --fix`) re-runs `runStatus` afterwards to produce
+ * the post-fix report.
+ *
+ * Fixers are intentionally narrow: they only handle drift the tool
+ * can resolve unambiguously. `Migrations` requires a user-supplied
+ * name slug (no auto-fix); `History` and `Plugins` have nothing to
+ * fix; `Map` calls `refresh`; `Env` calls `sync`.
+ */
+export async function runStatusFixes(
+  projectRoot: string,
+  config: PillarConfig,
+  report: StatusReport,
+): Promise<FixReport[]> {
+  const fixes: FixReport[] = [];
+  const needsFix = (name: string): boolean => {
+    const section = report.sections.find((s) => s.name === name);
+    return section !== undefined && section.level !== 'ok';
+  };
+
+  if (needsFix('Map')) fixes.push(await fixMap(projectRoot, config));
+  if (needsFix('Env')) fixes.push(await fixEnv(projectRoot));
+
+  return fixes;
+}
+
+async function fixMap(projectRoot: string, config: PillarConfig): Promise<FixReport> {
+  const manager = new MapManager(projectRoot);
+  try {
+    // Capture pre-state so we can report a meaningful diff.
+    const before = await manager.load();
+    const beforeValidation = before ? await manager.validate() : null;
+    const beforeDrift =
+      (beforeValidation?.unmappedFiles.length ?? 0) +
+      (beforeValidation?.missingFiles.length ?? 0);
+
+    await manager.refresh(config);
+
+    const afterValidation = await manager.validate();
+    const afterDrift = afterValidation.unmappedFiles.length + afterValidation.missingFiles.length;
+
+    if (!before) {
+      return {
+        section: 'Map',
+        changed: true,
+        summary: 'rebuilt missing project map',
+      };
+    }
+    if (beforeDrift === 0 && afterDrift === 0) {
+      return { section: 'Map', changed: false, summary: 'already in sync' };
+    }
+    return {
+      section: 'Map',
+      changed: true,
+      summary: `refreshed (${beforeDrift} → ${afterDrift} drift entries)`,
+    };
+  } catch (err) {
+    return {
+      section: 'Map',
+      changed: false,
+      summary: `refresh failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+async function fixEnv(projectRoot: string): Promise<FixReport> {
+  const manager = new EnvManager(projectRoot);
+  try {
+    const result = await manager.sync();
+    if (result.added.length === 0) {
+      return { section: 'Env', changed: false, summary: 'nothing to add' };
+    }
+    return {
+      section: 'Env',
+      changed: true,
+      summary: `added ${result.added.length} key(s) to .env`,
+      details: result.added,
+    };
+  } catch (err) {
+    return {
+      section: 'Env',
+      changed: false,
+      summary: `sync failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
 // ---------------------------------------------------------------------------
 
 function sectionPlugins(config: PillarConfig): StatusSection {

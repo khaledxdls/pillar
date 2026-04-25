@@ -420,7 +420,10 @@ program
   .command('status')
   .description('One-pass project health summary — map, env, migrations, history, plugins')
   .option('--json', 'Emit machine-readable JSON for CI integration')
-  .action(async (options: { json?: boolean }) => {
+  .option('--fix', 'Auto-resolve drift the tool can fix unambiguously (map refresh, env sync)')
+  .option('--watch', 'Re-render the report on an interval (incompatible with --json)')
+  .option('--interval <seconds>', 'Watch interval in seconds (1–60, default 2)')
+  .action(async (options: { json?: boolean; fix?: boolean; watch?: boolean; interval?: string }) => {
     const { statusCommand } = await import('../commands/status.js');
     await statusCommand(options);
   });

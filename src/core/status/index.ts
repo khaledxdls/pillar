@@ -1,2 +1,8 @@
-export { runStatus } from './status.js';
-export type { StatusReport, StatusSection, StatusLevel, ProjectInfo } from './status.js';
+export { runStatus, runStatusFixes } from './status.js';
+export type {
+  StatusReport,
+  StatusSection,
+  StatusLevel,
+  ProjectInfo,
+  FixReport,
+} from './status.js';
