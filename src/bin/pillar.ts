@@ -140,6 +140,17 @@ addCmd
   });
 
 addCmd
+  .command('observability')
+  .description('Scaffold logging, request-id, error handling, and /health + /ready')
+  .option('--dry-run', 'Preview without creating')
+  .option('-f, --force', 'Overwrite existing files')
+  .option('--files-only', 'Emit files only — skip package.json / env / app wiring')
+  .action(async (options: { dryRun?: boolean; force?: boolean; filesOnly?: boolean }) => {
+    const { addObservabilityCommand } = await import('../commands/observability.js');
+    await addObservabilityCommand(options);
+  });
+
+addCmd
   .command('relation <source> <target>')
   .description('Add a relation between resources (e.g., "user posts --type one-to-many")')
   .option('-t, --type <type>', 'Relation type: one-to-one, one-to-many, many-to-many', 'one-to-many')

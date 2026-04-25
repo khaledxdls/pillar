@@ -398,6 +398,58 @@ Options:
 
 ---
 
+### `pillar add observability`
+
+Scaffold a production-grade logging + request-id + error-handling + health module in one command.
+
+```bash
+pillar add observability
+```
+
+Generates (paths vary by architecture — example is feature-first):
+
+```
+src/features/observability/
+  request-context.ts   # AsyncLocalStorage carrying { requestId } per request
+  logger.ts            # pino logger; logger() returns a child bound to the current requestId
+  request-id.ts        # Generates/propagates X-Request-Id and binds AsyncLocalStorage
+  http-logger.ts       # Structured access logging with duration in ms
+  error-handler.ts     # Terminal error → JSON { error: { message, requestId } }
+  health.ts            # GET /health (liveness) + GET /ready (readiness)
+```
+
+Stack-aware emission:
+
+| Stack | What you get |
+|-------|--------------|
+| **Express / Hono** | Middlewares + health router + `errorHandler` registered in `app.ts` |
+| **Fastify** | Plugins registered via `app.register()` inside `buildApp()` |
+| **NestJS** | `ObservabilityModule` (controller + global `APP_INTERCEPTOR` + `APP_FILTER` + `RequestIdMiddleware`), auto-imported into `AppModule` |
+| **Next.js** | App Router handlers at `src/app/api/{health,ready}/route.ts` + reusable `withRequestContext` / `withHttpLog` helpers |
+
+Side effects (all recorded in history — a single `pillar undo` reverses the entire scaffold):
+
+- Adds `pino` (+ `pino-pretty` as devDep) to `package.json`
+- Adds `LOG_LEVEL` + `LOG_PRETTY` to `.env` and `.env.example`
+- Wires the primitives into the app entry (Express/Fastify/Hono) or `AppModule` (NestJS)
+
+Production defaults:
+
+- Sensitive paths redacted by default (`authorization`, `cookie`, `*.password`, `*.token`)
+- 5xx error bodies surface only `"Internal Server Error"` plus the requestId — never leak stack traces or messages
+- Request IDs honor inbound `X-Request-Id` (length ≤128) or fall back to `crypto.randomUUID()`
+- AsyncLocalStorage means `logger()` automatically binds the requestId — works inside services, repos, anywhere
+
+Options:
+
+| Flag | Description |
+|------|-------------|
+| `--dry-run` | Preview files/deps/env changes without writing |
+| `-f, --force` | Overwrite existing files |
+| `--files-only` | Emit files only — skip `package.json` / env / app wiring |
+
+---
+
 ### `pillar add middleware <name>`
 
 Generates a middleware file. **Known production kinds** (`cors`, `rate-limit`, `helmet`, `request-id`) get a full stack-aware scaffold: template, npm deps, env keys, and AST wiring into the app entry. Any other name falls back to a generic stub with stack-aware type imports (Express `NextFunction`, Fastify `HookHandlerDoneFunction`, Hono `Next`).
@@ -1055,6 +1107,7 @@ Every generation command follows these rules:
 | `pillar add endpoint <resource> <def>` | Add a custom endpoint |
 | `pillar add relation <source> <target>` | Add a relation between resources |
 | `pillar add auth --strategy jwt` | Scaffold a JWT authentication module |
+| `pillar add observability` | Scaffold pino logging, request-id, error handler, and `/health`/`/ready` |
 | `pillar add middleware <kind>` | Scaffold middleware — `cors`, `rate-limit`, `helmet`, `request-id` (stack-aware + wired), or any name (generic stub) |
 | `pillar add linting` | Set up ESLint + Prettier |
 | `pillar add git-hooks` | Set up Husky + lint-staged |

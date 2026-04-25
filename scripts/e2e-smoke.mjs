@@ -210,6 +210,24 @@ async function runStack(stack) {
       return { stack: stack.name, ok: false, reason: failure, durationMs: Date.now() - started };
     }
 
+    // 3b2. pillar add observability — logger + request-id + error handler +
+    //      /health + /ready. Reuses the post-auth install for pino, then we'll
+    //      do one more install in 3c for any extra middleware deps.
+    const obsRes = await run(prefix, process.execPath, [
+      pillarBin, 'add', 'observability',
+    ], { cwd: projectDir, timeoutMs: 60_000 });
+    if (obsRes.code !== 0) {
+      failure = `pillar add observability failed (exit ${obsRes.code})`;
+      return { stack: stack.name, ok: false, reason: failure, durationMs: Date.now() - started };
+    }
+    const obsInstall = await run(prefix, 'npm', ['install', '--no-audit', '--no-fund', '--loglevel=error'], {
+      cwd: projectDir, timeoutMs: args.installTimeoutMs,
+    });
+    if (obsInstall.code !== 0) {
+      failure = `npm install (post-observability) failed (exit ${obsInstall.code})`;
+      return { stack: stack.name, ok: false, reason: failure, durationMs: Date.now() - started };
+    }
+
     // 3c. pillar add middleware — exercise every supported kind so that all
     //     four stack-specific templates (and their wiring paths) compile.
     //     Runs one aggregate install afterwards for any new runtime deps.
