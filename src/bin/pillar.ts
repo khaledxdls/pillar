@@ -415,6 +415,16 @@ dbCmd
     await dbRollbackCommand(options);
   });
 
+// --- pillar status ---
+program
+  .command('status')
+  .description('One-pass project health summary — map, env, migrations, history, plugins')
+  .option('--json', 'Emit machine-readable JSON for CI integration')
+  .action(async (options: { json?: boolean }) => {
+    const { statusCommand } = await import('../commands/status.js');
+    await statusCommand(options);
+  });
+
 // --- pillar undo ---
 program
   .command('undo')

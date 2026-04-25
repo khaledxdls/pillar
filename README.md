@@ -1066,7 +1066,8 @@ Every generation command follows these rules:
 | `pillar test generate <path>` | Generate test stubs |
 | `pillar seed generate <resource>` | Generate seed data |
 | `pillar seed run` | Execute all seed files |
-| `pillar doctor` | Run health diagnostics |
+| `pillar status` | One-pass project health summary — map, env, migrations, history, plugins (`--json` for CI) |
+| `pillar doctor` | Run full health diagnostics (includes `tsc`) |
 | `pillar lint architecture` | Enforce the chosen architectural pattern |
 | `pillar env validate` | Check .env against .env.example |
 | `pillar env sync` | Sync missing env keys |
